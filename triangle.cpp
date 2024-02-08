@@ -117,23 +117,23 @@ struct Vertex
 
 const std::vector<Vertex> vertices =
 {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
     {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
 };
 
 const std::vector<Vertex> vertices2 =
 {
-    {{0.2f, -0.3f}, {1.0f, 0.0f, 0.0f}},
-    {{0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.3f, 0.7f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, 0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}}
 };
 
 struct UniformBufferObject
 {
-    mat4 model;
-    mat4 view;
-    mat4 proj;
+    alignas(16) mat4 model;
+    alignas(16) mat4 view;
+    alignas(16) mat4 proj;
 };
 
 class Renderer
@@ -272,6 +272,7 @@ private:
         // mac support
         extensions.emplace_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
         extensions.emplace_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
         createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
         createInfo.enabledExtensionCount = (u32) extensions.size();
         createInfo.ppEnabledExtensionNames = extensions.data();
@@ -828,7 +829,7 @@ private:
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
         rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
 
         VkPipelineMultisampleStateCreateInfo multisampling {};
@@ -1021,6 +1022,7 @@ private:
     struct VertexBuffer
     {
         VkDevice device;
+        Renderer* t;
 
         VkBuffer buffer;
         VkDeviceMemory bufferMemory;
@@ -1029,6 +1031,7 @@ private:
 
         VertexBuffer(Renderer* t, const std::vector<Vertex> &vertices)
         {
+            this->t = t;
             this->device = t->device;
             this->verticesCount = vertices.size();
 
@@ -1055,6 +1058,7 @@ private:
             VkBuffer vertexBuffers[] = {buffer};
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, t->pipelineLayout, 0, 1, &(t->descriptorSets[t->currentFrame]), 0, nullptr);
             vkCmdDraw(commandBuffer, verticesCount, 1, 0, 0);
         }
 
@@ -1123,10 +1127,37 @@ private:
         allocInfo.descriptorSetCount = static_cast<u32>(max_frames_in_flight);
         allocInfo.pSetLayouts = layouts.data();
 
+        descriptorSets.resize(max_frames_in_flight);
+        auto result = vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data());
+
+        if (result != VK_SUCCESS)
+        {
+            printf("failed: %d\n", result);
+            throw std::runtime_error("descriptor sets creation failed!");
+        }
+
         for (size_t i = 0; i < max_frames_in_flight; i++)
         {
+            VkDescriptorBufferInfo bufferInfo {};
+            bufferInfo.buffer = uniformBuffers[i];
+            bufferInfo.offset = 0;
+            bufferInfo.range = sizeof(UniformBufferObject);
+
+            VkWriteDescriptorSet descriptorWrite {};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = descriptorSets[i];
+            descriptorWrite.dstBinding = 0;
+            descriptorWrite.dstArrayElement = 0;
+
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrite.descriptorCount = 1;
+
+            descriptorWrite.pBufferInfo = &bufferInfo;
+
+            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, null);
 
         }
+
     }
 
     void createCommandBuffers()

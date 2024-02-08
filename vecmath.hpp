@@ -56,6 +56,11 @@ struct Vec2 : vec<T, Vec2<T> >
         return this / this->length();
     }
 
+    T dot(const Vec2<T> &o)
+    {
+        return this->x * o.x + this->y * o.y;
+    }
+
     template<T op(const T&, const T&)>
     static inline Vec2<T> operate(const Vec2<T> &a, const Vec2<T> &b)
     {
@@ -129,9 +134,14 @@ struct Vec3 : vec<T, Vec3<T> >
         return *this / this->length();
     }
 
-    Vec3<T> cross(const Vec3<T> &o)
+    Vec3<T> cross(Vec3<T> &o)
     {
         return Vec3(this->y * o.z - this->z * o.y, o.x * this->z - o.z * this->x, this->x * o.y - this->y * o.x);
+    }
+
+    T dot(Vec3<T> &o)
+    {
+        return this->x * o.x + this->y * o.y + this->z * o.z;
     }
 
     template<T op(const T&, const T&)>
@@ -249,6 +259,11 @@ struct Vec4 : vec<T, Vec4<T> >
     Vec4<T> normalize()
     {
         return this / this->length();
+    }
+
+    T dot(const Vec4<T> &o)
+    {
+        return this->x * o.x + this->y * o.y + this->z * o.z + this->w * o.w;
     }
 
     template<T op(const T&, const T&)>
@@ -444,6 +459,11 @@ struct Mat
         return m;
     }
 
+    static inline Mat<T, 4, 4> translation(Vec3<T> trans)
+    {
+        return translation(trans.x, trans.y, trans.z);
+    }
+
     static inline Mat<T, 4, 4> scale(T sx, T sy, T sz)
     {
         Mat<T, 4, 4> m = Mat<T, 4, 4>();
@@ -482,16 +502,15 @@ struct Mat
         return rotate(axis.x * sin(angle / 2), axis.y * sin(angle / 2), axis.z * sin(angle / 2), cos(angle / 2));
     }
 
-    // Adapted from https://registry.khronos.org/OpenGL-Refpages/gl2.1/xhtml/gluLookAt.xml
+    // Adapted from https://github.com/g-truc/glm/blob/4eb3fe1d7d8fd407cc7ccfa801a0311bb7dd281c/glm/ext/matrix_transform.inl#L153
     static inline Mat<T, 4, 4> lookAt(Vec3<float> eyePos, Vec3<T> centerLookAtPos, Vec3<T> upVec)
     {
-        Vec3<T> F = centerLookAtPos - eyePos;
-        Vec3<T> f = F.normalize();
+        Vec3<T> f = (centerLookAtPos - eyePos).normalize();
         Vec3<T> up = upVec.normalize();
-        Vec3<T> s = f.cross(up);
-        Vec3<T> u = s.normalize().cross(f);
+        Vec3<T> s = f.cross(up).normalize();
+        Vec3<T> u = s.cross(f);
 
-        return Mat<T, 4, 4>(s.x, u.x, -f.x, 0,  s.y, u.y, -f.y, 0,  s.z, u.z, -f.z, 0,  0, 0, 0, 1);
+        return Mat<T, 4, 4>(s.x, u.x, -f.x, 0,  s.y, u.y, -f.y, 0,  s.z, u.z, -f.z, 0,  -s.dot(eyePos), -u.dot(eyePos), f.dot(eyePos), 1);
     }
 
     // Adapted from https://registry.khronos.org/OpenGL-Refpages/gl2.1/xhtml/gluPerspective.xml
@@ -521,7 +540,7 @@ struct Mat
     }
 
     template<int z>
-    Mat<T, y, z> operator* (Mat<T, z, x> &m)
+    Mat<T, y, z> operator* (Mat<T, z, x> m)
     {
         Mat<T, y, z> result;
         for (int iy = 0; iy < y; iy++)
