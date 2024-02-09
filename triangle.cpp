@@ -10,6 +10,7 @@
 #include <set>
 #include <fstream>
 #include <array>
+#include <map>
 #include "vecmath.hpp"
 
 #define null nullptr
@@ -85,6 +86,35 @@ static std::vector<char> readFile(const std::string& filename)
     return buffer;
 }
 
+std::map<const std::string, std::vector<char>> cachedFileData;
+static std::vector<char>* readFileWithCache(const std::string& filename)
+{
+    bool present = cachedFileData.contains(filename);
+
+    if (!present)
+    {
+        std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+        if (!file.is_open())
+            throw std::runtime_error("opening file " + filename + " failed!");
+
+        size_t fileSize = (size_t) file.tellg();
+
+        cachedFileData.insert(std::pair(filename, std::vector<char>(fileSize)));
+
+        std::vector<char>* buffer = &(cachedFileData[filename]);
+
+        file.seekg(0);
+        file.read(buffer->data(), (long) fileSize);
+        file.close();
+
+        return buffer;
+    }
+
+    std::vector<char>* buffer = &(cachedFileData[filename]);
+    return buffer;
+}
+
 struct Vertex
 {
     vec2 pos;
@@ -112,6 +142,119 @@ struct Vertex
         descs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
         descs[1].offset = offsetof(Vertex, color);
         return descs;
+    }
+};
+
+struct Node;
+
+struct Attribute
+{
+    void* data;
+    size_t offset;
+    size_t stride;
+    VkFormat format;
+
+    Attribute(std::string dataPath, size_t offset, size_t stride, std::string format)
+    {
+        this->data = readFileWithCache(dataPath)->data();
+        this->offset = offset;
+        this->stride = stride;
+
+        if (format == "R32G32B32_SFLOAT")
+            this->format = VK_FORMAT_R32G32B32_SFLOAT;
+        else if (format == "R8G8B8A8_UNORM")
+            this->format = VK_FORMAT_R8G8B8A8_UNORM;
+    }
+};
+
+struct Mesh
+{
+    std::string name;
+    size_t count;
+    VkPrimitiveTopology topology;
+    std::map<std::string, Attribute> attributes;
+
+    Mesh(std::string name, size_t count, const std::string& topology)
+    {
+        this->name = name;
+        this->count = count;
+
+        if (topology == "POINT_LIST")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        else if (topology == "LINE_LIST")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        else if (topology == "LINE_STRIP")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+        else if (topology == "TRIANGLE_LIST")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        else if (topology == "TRIANGLE_STRIP")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        else if (topology == "TRIANGLE_FAN")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+        else if (topology == "LINE_LIST_WITH_ADJACENCY")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
+        else if (topology == "LINE_STRIP_WITH_ADJACENCY")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
+        else if (topology == "TRIANGLE_LIST_WITH_ADJACENCY")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY;
+        else if (topology == "TRIANGLE_STRIP_WITH_ADJACENCY")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY;
+        else if (topology == "PATCH_LIST")
+            this->topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    }
+};
+
+struct Camera
+{
+    std::string name;
+    mat4 transform;
+
+    explicit Camera(const std::string &name,
+                    float aspectRatio,
+                    float verticalFOV,
+                    float nearPlane,
+                    float farPlane = std::numeric_limits<float>::infinity())
+    {
+        this->name = name;
+
+        if (farPlane == std::numeric_limits<float>::infinity())
+            this->transform = mat4::infinitePerspective(aspectRatio, verticalFOV, nearPlane);
+        else
+            this->transform = mat4::perspective(aspectRatio, verticalFOV, nearPlane, farPlane);
+    }
+};
+
+const std::vector<Node*> no_nodes = std::vector<Node*>();
+struct Node
+{
+    std::string name;
+    mat4 transform;
+    std::vector<Node*> children;
+    std::optional<Camera> camera;
+
+    explicit Node(const std::string &name,
+        vec3 translation = vec3(0.0f, 0.0f, 0.0f),
+        vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 0.0f),
+        vec3 scale = vec3(0.0f, 0.0f, 0.0f),
+        std::vector<Node*> children = no_nodes,
+        std::optional<Camera> camera = {})
+    {
+        this->name = name;
+        this->children = children;
+        this->transform = mat4::translation(translation) * mat4::rotate(rotation) * mat4::scale(scale);
+        this->camera = camera;
+    }
+};
+
+struct Scene
+{
+    std::string name;
+    std::vector<Node*> roots;
+
+    explicit Scene(const std::string &name, std::vector<Node*> roots)
+    {
+        this->name = name;
+        this->roots = roots;
     }
 };
 

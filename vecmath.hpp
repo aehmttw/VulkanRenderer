@@ -474,6 +474,11 @@ struct Mat
         return m;
     }
 
+    static inline Mat<T, 4, 4> scale(Vec3<T> s)
+    {
+        return scale(s);
+    }
+
     // Quaternion rotation
     // Adapted from https://www.euclideanspace.com/maths/geometry/rotations/conversions/quaternionToMatrix/index.htm
     static inline Mat<T, 4, 4> rotate(T rx, T ry, T rz, T rw)
@@ -493,6 +498,11 @@ struct Mat
 
         m[3][3] = 1;
         return m;
+    }
+
+    static inline Mat<T, 4, 4> rotate(Vec4<T> r)
+    {
+        return rotate(r);
     }
 
     // Quaternion rotation
