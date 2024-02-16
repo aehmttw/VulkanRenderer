@@ -12,6 +12,7 @@
 #include <array>
 #include <map>
 #include "vecmath.hpp"
+#include "json.hpp"
 
 #define null nullptr
 
@@ -224,25 +225,21 @@ struct Camera
     }
 };
 
-const std::vector<Node*> no_nodes = std::vector<Node*>();
 struct Node
 {
     std::string name;
     mat4 transform;
     std::vector<Node*> children;
-    std::optional<Camera> camera;
+    Camera* camera = null;
+    Mesh* mesh = null;
 
     explicit Node(const std::string &name,
         vec3 translation = vec3(0.0f, 0.0f, 0.0f),
-        vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 0.0f),
-        vec3 scale = vec3(0.0f, 0.0f, 0.0f),
-        std::vector<Node*> children = no_nodes,
-        std::optional<Camera> camera = {})
+        vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 1.0f),
+        vec3 scale = vec3(1.0f, 1.0f, 1.0f))
     {
         this->name = name;
-        this->children = children;
         this->transform = mat4::translation(translation) * mat4::rotate(rotation) * mat4::scale(scale);
-        this->camera = camera;
     }
 };
 
@@ -251,26 +248,168 @@ struct Scene
     std::string name;
     std::vector<Node*> roots;
 
-    explicit Scene(const std::string &name, std::vector<Node*> roots)
+    std::map<int, Node*> nodes;
+    std::map<int, Mesh*> meshes;
+    std::map<int, Camera*> cameras;
+
+    Scene(std::string name)
     {
         this->name = name;
-        this->roots = roots;
+    }
+
+    ~Scene()
+    {
+        for (auto n: nodes)
+        {
+            delete n.second;
+        }
+
+        for (auto n: meshes)
+        {
+            delete n.second;
+        }
+
+        for (auto n: cameras)
+        {
+            delete n.second;
+        }
     }
 };
 
-const std::vector<Vertex> vertices =
+Scene* parseScene(jarray* sceneArray)
 {
-    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
-};
+    Scene* scene;
+    std::map<int, Node*> nodes;
+    std::map<int, Mesh*> meshes;
+    std::map<int, Camera*> cameras;
 
-const std::vector<Vertex> vertices2 =
-{
-    {{-0.5f, 0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}}
-};
+    // Initialize
+    int i = 0;
+    for (jvalue* v: sceneArray->elements)
+    {
+        if (i == 0)
+        {
+            jstring* s = jstring::cast(v);
+            assert(s->value == "s72-v1");
+            i++;
+            continue;
+        }
+
+        jobject* o = jobject::cast(v);
+        std::string type = jstring::cast((*o)["type"])->value;
+        if (type == "SCENE")
+            scene = new Scene(jstring::cast((*o)["name"])->value);
+        else if (type == "NODE")
+        {
+            std::string name = jstring::cast((*o)["name"])->value;
+            vec3 translation = vec3(0.0f, 0.0f, 0.0f);
+            vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 1.0f);
+            vec3 scale = vec3(1.0f, 1.0f, 1.0f);
+
+            jarray* jtranslation = jarray::cast((*o)["translation"]);
+            if (jtranslation != null)
+                translation = vec3(jnumber::cast((*jtranslation)[0])->value, jnumber::cast((*jtranslation)[1])->value, jnumber::cast((*jtranslation)[2])->value);
+
+            jarray* jrotation = jarray::cast((*o)["rotation"]);
+            if (jrotation != null)
+                rotation = vec4(jnumber::cast((*jrotation)[0])->value, jnumber::cast((*jrotation)[1])->value, jnumber::cast((*jrotation)[2])->value, jnumber::cast((*jrotation)[3])->value);
+
+            jarray* jscale = jarray::cast((*o)["scale"]);
+            if (jscale != null)
+                scale = vec3(jnumber::cast((*jscale)[0])->value, jnumber::cast((*jscale)[1])->value, jnumber::cast((*jscale)[2])->value);
+
+            nodes.emplace(std::pair(i, new Node(name, translation, rotation, scale)));
+        }
+        else if (type == "CAMERA")
+        {
+            std::string name = jstring::cast((*o)["name"])->value;
+            jobject* perspective = jobject::cast((*o)["perspective"]);
+            float aspect = jnumber::cast((*perspective)["aspect"])->value;
+            float vfov = jnumber::cast((*perspective)["vfov"])->value;
+            float near = jnumber::cast((*perspective)["near"])->value;
+            jnumber* far = jnumber::cast((*perspective)["far"]);
+
+            Camera* camera;
+
+            if (far != null)
+                camera = new Camera(name, aspect, vfov, near, far->value);
+            else
+                camera = new Camera(name, aspect, vfov, near);
+
+            cameras.emplace(std::pair(i, camera));
+        }
+        else if (type == "MESH")
+        {
+            std::string name = jstring::cast((*o)["name"])->value;
+            std::string topology = jstring::cast((*o)["name"])->value;
+            int count = (int) jnumber::cast((*o)["count"])->value;
+            jobject* attributes = jobject::cast((*o)["attributes"]);
+            Mesh* mesh = new Mesh(name, count, topology);
+
+            for (auto ap: attributes->elements)
+            {
+                jobject* a = jobject::cast(ap.second);
+                std::string src = jstring::cast((*a)["src"])->value;
+                auto offset = (size_t) jnumber::cast((*a)["offset"])->value;
+                auto stride = (size_t) jnumber::cast((*a)["stride"])->value;
+                std::string format = jstring::cast((*a)["format"])->value;
+
+                mesh->attributes.emplace(std::pair(ap.first, Attribute(src, offset, stride, format)));
+            }
+
+            meshes.emplace(std::pair(i, mesh));
+        }
+
+        i++;
+    }
+
+    //Populate pointers
+    i = 0;
+    for (jvalue* v: sceneArray->elements)
+    {
+        if (i == 0)
+        {
+            i++;
+            continue;
+        }
+
+        jobject *o = static_cast<jobject *>(v);
+        std::string type = jstring::cast((*o)["type"])->value;
+        if (type == "SCENE")
+        {
+            jarray* roots = jarray::cast((*o)["roots"]);
+            for (jvalue* v: roots->elements)
+            {
+                int n = (int) jnumber::cast(v)->value;
+                scene->roots.emplace_back(nodes[i]);
+            }
+        }
+        else if (type == "NODE")
+        {
+            jarray* kids = jarray::cast((*o)["children"]);
+            if (kids != null)
+            {
+                for (jvalue *v: kids->elements)
+                {
+                    int n = (int) jnumber::cast(v)->value;
+                    nodes[i]->children.emplace_back(nodes[n]);
+                }
+            }
+
+            jnumber* camera = jnumber::cast((*o)["camera"]);
+            if (camera != null)
+                nodes[i]->camera = cameras[(int) camera->value];
+
+            jnumber* mesh = jnumber::cast((*o)["mesh"]);
+            if (mesh != null)
+                nodes[i]->mesh = meshes[(int) mesh->value];
+        }
+
+        i++;
+    }
+
+    return scene;
+}
 
 struct UniformBufferObject
 {
@@ -318,8 +457,8 @@ private:
     std::vector<VkFramebuffer> swapChainFramebuffers;
 
     struct VertexBuffer;
-    VertexBuffer* vertexBuffer;
-    VertexBuffer* vertexBuffer2;
+//    VertexBuffer* vertexBuffer;
+//    VertexBuffer* vertexBuffer2;
 
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
@@ -338,6 +477,8 @@ private:
 
     u32 currentFrame = 0;
     bool framebufferResized = false;
+
+    Scene* currentScene = null;
 
     void initWindow()
     {
@@ -369,8 +510,8 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
-        vertexBuffer = new VertexBuffer(this, vertices);
-        vertexBuffer2 = new VertexBuffer(this, vertices2);
+//        vertexBuffer = new VertexBuffer(this, vertices);
+//        vertexBuffer2 = new VertexBuffer(this, vertices2);
         createUniformBuffers();
         createDescriptorPool();
         createDescriptorSets();
@@ -1361,8 +1502,8 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        vertexBuffer->draw(commandBuffer);
-        vertexBuffer2->draw(commandBuffer);
+//        vertexBuffer->draw(commandBuffer);
+//        vertexBuffer2->draw(commandBuffer);
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -1496,11 +1637,7 @@ private:
 
     void cleanup()
     {
-        delete vertexBuffer;
-        vertexBuffer = null;
-
-        delete vertexBuffer2;
-        vertexBuffer2 = null;
+        // TODO: delete vert buffers
 
         cleanupSwapChain();
 
@@ -1576,6 +1713,10 @@ private:
 
 int main()
 {
+    std::string s = std::string(readFileWithCache("sphereflake.s72")->data());
+    jarray* o = jparse_array(s);
+    parseScene(o);
+
     Renderer app;
 
     try

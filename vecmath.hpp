@@ -476,7 +476,7 @@ struct Mat
 
     static inline Mat<T, 4, 4> scale(Vec3<T> s)
     {
-        return scale(s);
+        return scale(s.x, s.y, s.z);
     }
 
     // Quaternion rotation
@@ -502,7 +502,7 @@ struct Mat
 
     static inline Mat<T, 4, 4> rotate(Vec4<T> r)
     {
-        return rotate(r);
+        return rotate(r.x, r.y, r.z, r.w);
     }
 
     // Quaternion rotation

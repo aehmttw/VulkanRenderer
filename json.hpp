@@ -2,14 +2,64 @@
 #include <string>
 #include <vector>
 
+const int type_string = 0;
+const int type_number = 1;
+const int type_object = 2;
+const int type_array = 3;
+const int type_bool = 4;
+const int type_null = -1;
+
+const char* type_to_string(int type)
+{
+    if (type == type_string)
+        return "string";
+    else if (type == type_number)
+        return "number";
+    else if (type == type_object)
+        return "object";
+    else if (type == type_array)
+        return "array";
+    else if (type == type_bool)
+        return "bool";
+    else if (type == type_null)
+        return "null";
+
+    return "bad type";
+}
+
 struct jvalue
 {
-
+    int type;
 };
+
+void typecheck(jvalue* value, int expected)
+{
+    if (value == nullptr)
+        return;
+
+    if (value->type != expected)
+    {
+        printf("Type mismatch: expected %s but got %s\n", type_to_string(expected), type_to_string(value->type));
+        abort();
+    }
+}
 
 struct jarray : jvalue
 {
     std::vector<jvalue*> elements;
+
+    jarray()
+    {
+        this->type = type_array;
+    }
+
+    ~jarray()
+    {
+        for (auto e: elements)
+        {
+            delete e;
+        }
+    }
 
     jvalue* operator[] (int i)
     {
@@ -20,50 +70,110 @@ struct jarray : jvalue
     {
         return elements.size();
     }
+
+    static jarray* cast(jvalue* v)
+    {
+        typecheck(v, type_array);
+        return static_cast<jarray*>(v);
+    }
 };
 
 struct jstring : jvalue
 {
-    std::string s;
+    std::string value;
 
     jstring(std::string s)
     {
-        this->s = s;
+        this->value = s;
+        this->type = type_string;
+    }
+
+    static jstring* cast(jvalue* v)
+    {
+        typecheck(v, type_string);
+        return static_cast<jstring*>(v);
     }
 };
 
 struct jnumber : jvalue
 {
-    double v;
+    double value;
 
     jnumber(double d)
     {
-        this->v = d;
+        this->value = d;
+        this->type = type_number;
+    }
+
+    static jnumber* cast(jvalue* v)
+    {
+        typecheck(v, type_number);
+        return static_cast<jnumber*>(v);
     }
 };
 
 struct jbool : jvalue
 {
-    bool b;
+    bool value;
 
     jbool(bool b)
     {
-        this->b = b;
+        this->value = b;
+        this->type = type_bool;
+    }
+
+    static jbool* cast(jvalue* v)
+    {
+        typecheck(v, type_bool);
+        return static_cast<jbool*>(v);
     }
 };
 
 struct jnull : jvalue
 {
-
+    jnull()
+    {
+        this->type = type_null;
+    }
 };
 
 struct jobject : jvalue
 {
+    jobject()
+    {
+        this->type = type_object;
+    }
+
+    ~jobject()
+    {
+        for (const auto& e: elements)
+        {
+            delete e.second;
+        }
+    }
+
     std::map<std::string, jvalue*> elements;
 
-    jvalue* operator[] (std::string s)
+    jvalue* operator[] (std::string &s)
     {
-        return (elements[s]);
+        if (elements.contains(s))
+            return (elements.at(s));
+        else
+            return nullptr;
+    }
+
+    jvalue* operator[] (const char* s)
+    {
+        if (elements.contains(s))
+            return (elements.at(s));
+        else
+            return nullptr;
+    }
+
+    static jobject* cast(jvalue* v)
+    {
+        typecheck(v, type_object);
+        return static_cast<jobject*>(v);
     }
 };
 
@@ -77,8 +187,6 @@ static jnull* parse_null(const char* chars, int* index);
 
 static jvalue* parse_value(const char* chars, int* index)
 {
-    printf("value %d\n", *index);
-
     while (true)
     {
         int i = *index;
@@ -106,8 +214,6 @@ static jvalue* parse_value(const char* chars, int* index)
 
 static jobject* parse_object(const char* chars, int* index)
 {
-    printf("obj %d\n", *index);
-
     jobject* o = new jobject();
     int phase = 0;
     std::string key;
@@ -120,7 +226,9 @@ static jobject* parse_object(const char* chars, int* index)
             return o;
         else if (chars[i] == '"' && phase == 0)
         {
-            key = parse_string(chars, index)->s;
+            jstring* s = parse_string(chars, index);
+            key = s->value;
+            delete s;
             phase = 1;
         }
         else if (chars[i] == ':' && phase == 1)
@@ -140,8 +248,6 @@ static jobject* parse_object(const char* chars, int* index)
 
 static jarray* parse_array(const char* chars, int* index)
 {
-    printf("arr %d %c\n", *index, chars[*index]);
-
     auto* a = new jarray();
     bool expectComma = false;
     while (true)
@@ -150,10 +256,7 @@ static jarray* parse_array(const char* chars, int* index)
         (*index)++;
 
         if (chars[i] == ']')
-        {
-            printf("x arr %d\n", *index);
             return a;
-        }
         else if (chars[i] == ' ' || chars[i] == '\n' || chars[i] == '\t' || chars[i] == '\r')
             {}
         else if (!expectComma)
@@ -174,8 +277,6 @@ static jarray* parse_array(const char* chars, int* index)
 
 static jnumber* parse_number(const char* chars, int* index)
 {
-    printf("num %d\n", *index);
-
     (*index)--;
 
     bool first = true;
@@ -200,8 +301,6 @@ static jnumber* parse_number(const char* chars, int* index)
 
 static jstring* parse_string(const char* chars, int* index)
 {
-    printf("str %d\n", *index);
-
     std::vector<char> str;
 
     bool escape = false;
@@ -240,19 +339,15 @@ static jstring* parse_string(const char* chars, int* index)
 
 static jbool* parse_bool(const char* chars, int* index)
 {
-    printf("bool %d\n", *index);
-
     (*index)--;
     if (memcmp(&chars[*index], "true", 4) == 0)
     {
         *index += 4;
-        printf("x bool %d\n", *index);
         return new jbool {true};
     }
     else if (memcmp(&chars[*index], "false", 5) == 0)
     {
         *index += 5;
-        printf("x bool %d\n", *index);
         return new jbool {false};
     }
     else
@@ -265,13 +360,10 @@ static jbool* parse_bool(const char* chars, int* index)
 
 static jnull* parse_null(const char* chars, int* index)
 {
-    printf("null %d\n", *index);
-
     (*index)--;
     if (memcmp(&chars[*index], "null", 4) == 0)
     {
         *index += 4;
-        printf("x null %d\n", *index);
         return nullptr;
     }
     else
@@ -292,4 +384,17 @@ static jobject* jparse(std::string str)
     i++;
 
     return parse_object(chars, &i);
+}
+
+static jarray* jparse_array(std::string str)
+{
+    int i = 0;
+    const char* chars = str.c_str();
+
+    while (chars[i] != '[')
+        i++;
+
+    i++;
+
+    return parse_array(chars, &i);
 }
