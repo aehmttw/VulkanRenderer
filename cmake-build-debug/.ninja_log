@@ -1,4 +1,0 @@
-# ninja log v5
-8	55	1707194205666291689	build.ninja	d7ddd021936a2e4
-0	716	1705698506044142871	CMakeFiles/vulkan.dir/main.cpp.o	da70add80811e35
-0	924	1705698506252513825	CMakeFiles/vulkan.dir/triangle.cpp.o	38e3e9843ced7ebe
