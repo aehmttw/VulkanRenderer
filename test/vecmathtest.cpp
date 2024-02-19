@@ -2,7 +2,7 @@
 // Created by Matei Budiu on 1/30/24.
 //
 
-#include "vecmath.hpp"
+#include "../vecmath.hpp"
 //#include <glm/glm.hpp>
 //#include <glm/ext/matrix_transform.hpp>
 

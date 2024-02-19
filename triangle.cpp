@@ -1243,8 +1243,8 @@ private:
 
     void createGraphicsPipeline()
     {
-        auto vertShaderCode = readFile("shaders/spv/shader.vert.spv");
-        auto fragShaderCode = readFile("shaders/spv/shader.frag.spv");
+        auto vertShaderCode = readFile("spv/shader.vert.spv");
+        auto fragShaderCode = readFile("spv/shader.frag.spv");
 
         VkShaderModule vertSM = createShaderModule(vertShaderCode);
         VkShaderModule fragSM = createShaderModule(fragShaderCode);
