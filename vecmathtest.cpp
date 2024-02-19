@@ -30,7 +30,18 @@ int main()
 //    mat<int, 2, 2> m3 = mat<int, 2, 2>::D(5);
 //    mat<int, 2, 2> m4 = m2 * m3;
       //glm::lookAt(glm::vec3(4,3,-3), glm::vec3(0,0,0),glm::vec3(0,1,0))
-      mat4 m = mat4::lookAt(vec3(4.0, 3.0, -3.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
+
+
+    vec4 v = vec4(1.0f, 2.0f, 3.0f, 4.0f);
+    mat4 m = mat4::rotate(v.normalize());
+
+    vec4 v2 = vec4(1.0f, 2.0f, 3.0f, -4.0f);
+    mat4 m2 = mat4::rotate(v2.normalize());
+
+
+    m = mat4::rotateAxis(vec3(0.0f, 0.0f, 1.0f), 0.0);
+    //m = m * m2;
+
     printf("%f %f %f %f \n %f %f %f %f \n %f %f %f %f \n %f %f %f %f\n",
            m.data[0][0], m.data[0][1], m.data[0][2], m.data[0][3],
            m.data[1][0], m.data[1][1], m.data[1][2], m.data[1][3],

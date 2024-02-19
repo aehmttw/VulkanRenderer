@@ -15,8 +15,11 @@
 #include "json.hpp"
 
 #define null nullptr
+//#define null NULL
 
 typedef uint32_t u32;
+
+static size_t meshesDrawn;
 
 const std::vector<const char*> validationLayers =
         {
@@ -118,8 +121,9 @@ static std::vector<char>* readFileWithCache(const std::string& filename)
 
 struct Vertex
 {
-    vec2 pos;
-    vec3 color;
+    vec3 pos;
+    vec3 normal;
+    u8vec4 color;
 
     static VkVertexInputBindingDescription getBindDesc()
     {
@@ -130,291 +134,30 @@ struct Vertex
         return desc;
     }
 
-    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDesc()
+    static std::array<VkVertexInputAttributeDescription, 3> getAttributeDesc()
     {
-        std::array<VkVertexInputAttributeDescription, 2> descs {};
+        std::array<VkVertexInputAttributeDescription, 3> descs {};
         descs[0].binding = 0;
         descs[0].location = 0;
-        descs[0].format = VK_FORMAT_R32G32_SFLOAT;
+        descs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
         descs[0].offset = offsetof(Vertex, pos);
 
         descs[1].binding = 0;
         descs[1].location = 1;
         descs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-        descs[1].offset = offsetof(Vertex, color);
+        descs[1].offset = offsetof(Vertex, normal);
+
+        descs[2].binding = 0;
+        descs[2].location = 2;
+        descs[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+        descs[2].offset = offsetof(Vertex, color);
         return descs;
     }
 };
 
-struct Node;
-
-struct Attribute
-{
-    void* data;
-    size_t offset;
-    size_t stride;
-    VkFormat format;
-
-    Attribute(std::string dataPath, size_t offset, size_t stride, std::string format)
-    {
-        this->data = readFileWithCache(dataPath)->data();
-        this->offset = offset;
-        this->stride = stride;
-
-        if (format == "R32G32B32_SFLOAT")
-            this->format = VK_FORMAT_R32G32B32_SFLOAT;
-        else if (format == "R8G8B8A8_UNORM")
-            this->format = VK_FORMAT_R8G8B8A8_UNORM;
-    }
-};
-
-struct Mesh
-{
-    std::string name;
-    size_t count;
-    VkPrimitiveTopology topology;
-    std::map<std::string, Attribute> attributes;
-
-    Mesh(std::string name, size_t count, const std::string& topology)
-    {
-        this->name = name;
-        this->count = count;
-
-        if (topology == "POINT_LIST")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-        else if (topology == "LINE_LIST")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-        else if (topology == "LINE_STRIP")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
-        else if (topology == "TRIANGLE_LIST")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        else if (topology == "TRIANGLE_STRIP")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-        else if (topology == "TRIANGLE_FAN")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
-        else if (topology == "LINE_LIST_WITH_ADJACENCY")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
-        else if (topology == "LINE_STRIP_WITH_ADJACENCY")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
-        else if (topology == "TRIANGLE_LIST_WITH_ADJACENCY")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY;
-        else if (topology == "TRIANGLE_STRIP_WITH_ADJACENCY")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY;
-        else if (topology == "PATCH_LIST")
-            this->topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
-    }
-};
-
-struct Camera
-{
-    std::string name;
-    mat4 transform;
-
-    explicit Camera(const std::string &name,
-                    float aspectRatio,
-                    float verticalFOV,
-                    float nearPlane,
-                    float farPlane = std::numeric_limits<float>::infinity())
-    {
-        this->name = name;
-
-        if (farPlane == std::numeric_limits<float>::infinity())
-            this->transform = mat4::infinitePerspective(aspectRatio, verticalFOV, nearPlane);
-        else
-            this->transform = mat4::perspective(aspectRatio, verticalFOV, nearPlane, farPlane);
-    }
-};
-
-struct Node
-{
-    std::string name;
-    mat4 transform;
-    std::vector<Node*> children;
-    Camera* camera = null;
-    Mesh* mesh = null;
-
-    explicit Node(const std::string &name,
-        vec3 translation = vec3(0.0f, 0.0f, 0.0f),
-        vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 1.0f),
-        vec3 scale = vec3(1.0f, 1.0f, 1.0f))
-    {
-        this->name = name;
-        this->transform = mat4::translation(translation) * mat4::rotate(rotation) * mat4::scale(scale);
-    }
-};
-
-struct Scene
-{
-    std::string name;
-    std::vector<Node*> roots;
-
-    std::map<int, Node*> nodes;
-    std::map<int, Mesh*> meshes;
-    std::map<int, Camera*> cameras;
-
-    Scene(std::string name)
-    {
-        this->name = name;
-    }
-
-    ~Scene()
-    {
-        for (auto n: nodes)
-        {
-            delete n.second;
-        }
-
-        for (auto n: meshes)
-        {
-            delete n.second;
-        }
-
-        for (auto n: cameras)
-        {
-            delete n.second;
-        }
-    }
-};
-
-Scene* parseScene(jarray* sceneArray)
-{
-    Scene* scene;
-    std::map<int, Node*> nodes;
-    std::map<int, Mesh*> meshes;
-    std::map<int, Camera*> cameras;
-
-    // Initialize
-    int i = 0;
-    for (jvalue* v: sceneArray->elements)
-    {
-        if (i == 0)
-        {
-            jstring* s = jstring::cast(v);
-            assert(s->value == "s72-v1");
-            i++;
-            continue;
-        }
-
-        jobject* o = jobject::cast(v);
-        std::string type = jstring::cast((*o)["type"])->value;
-        if (type == "SCENE")
-            scene = new Scene(jstring::cast((*o)["name"])->value);
-        else if (type == "NODE")
-        {
-            std::string name = jstring::cast((*o)["name"])->value;
-            vec3 translation = vec3(0.0f, 0.0f, 0.0f);
-            vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 1.0f);
-            vec3 scale = vec3(1.0f, 1.0f, 1.0f);
-
-            jarray* jtranslation = jarray::cast((*o)["translation"]);
-            if (jtranslation != null)
-                translation = vec3(jnumber::cast((*jtranslation)[0])->value, jnumber::cast((*jtranslation)[1])->value, jnumber::cast((*jtranslation)[2])->value);
-
-            jarray* jrotation = jarray::cast((*o)["rotation"]);
-            if (jrotation != null)
-                rotation = vec4(jnumber::cast((*jrotation)[0])->value, jnumber::cast((*jrotation)[1])->value, jnumber::cast((*jrotation)[2])->value, jnumber::cast((*jrotation)[3])->value);
-
-            jarray* jscale = jarray::cast((*o)["scale"]);
-            if (jscale != null)
-                scale = vec3(jnumber::cast((*jscale)[0])->value, jnumber::cast((*jscale)[1])->value, jnumber::cast((*jscale)[2])->value);
-
-            nodes.emplace(std::pair(i, new Node(name, translation, rotation, scale)));
-        }
-        else if (type == "CAMERA")
-        {
-            std::string name = jstring::cast((*o)["name"])->value;
-            jobject* perspective = jobject::cast((*o)["perspective"]);
-            float aspect = jnumber::cast((*perspective)["aspect"])->value;
-            float vfov = jnumber::cast((*perspective)["vfov"])->value;
-            float near = jnumber::cast((*perspective)["near"])->value;
-            jnumber* far = jnumber::cast((*perspective)["far"]);
-
-            Camera* camera;
-
-            if (far != null)
-                camera = new Camera(name, aspect, vfov, near, far->value);
-            else
-                camera = new Camera(name, aspect, vfov, near);
-
-            cameras.emplace(std::pair(i, camera));
-        }
-        else if (type == "MESH")
-        {
-            std::string name = jstring::cast((*o)["name"])->value;
-            std::string topology = jstring::cast((*o)["name"])->value;
-            int count = (int) jnumber::cast((*o)["count"])->value;
-            jobject* attributes = jobject::cast((*o)["attributes"]);
-            Mesh* mesh = new Mesh(name, count, topology);
-
-            for (auto ap: attributes->elements)
-            {
-                jobject* a = jobject::cast(ap.second);
-                std::string src = jstring::cast((*a)["src"])->value;
-                auto offset = (size_t) jnumber::cast((*a)["offset"])->value;
-                auto stride = (size_t) jnumber::cast((*a)["stride"])->value;
-                std::string format = jstring::cast((*a)["format"])->value;
-
-                mesh->attributes.emplace(std::pair(ap.first, Attribute(src, offset, stride, format)));
-            }
-
-            meshes.emplace(std::pair(i, mesh));
-        }
-
-        i++;
-    }
-
-    //Populate pointers
-    i = 0;
-    for (jvalue* v: sceneArray->elements)
-    {
-        if (i == 0)
-        {
-            i++;
-            continue;
-        }
-
-        jobject *o = static_cast<jobject *>(v);
-        std::string type = jstring::cast((*o)["type"])->value;
-        if (type == "SCENE")
-        {
-            jarray* roots = jarray::cast((*o)["roots"]);
-            for (jvalue* v: roots->elements)
-            {
-                int n = (int) jnumber::cast(v)->value;
-                scene->roots.emplace_back(nodes[i]);
-            }
-        }
-        else if (type == "NODE")
-        {
-            jarray* kids = jarray::cast((*o)["children"]);
-            if (kids != null)
-            {
-                for (jvalue *v: kids->elements)
-                {
-                    int n = (int) jnumber::cast(v)->value;
-                    nodes[i]->children.emplace_back(nodes[n]);
-                }
-            }
-
-            jnumber* camera = jnumber::cast((*o)["camera"]);
-            if (camera != null)
-                nodes[i]->camera = cameras[(int) camera->value];
-
-            jnumber* mesh = jnumber::cast((*o)["mesh"]);
-            if (mesh != null)
-                nodes[i]->mesh = meshes[(int) mesh->value];
-        }
-
-        i++;
-    }
-
-    return scene;
-}
-
 struct UniformBufferObject
 {
-    alignas(16) mat4 model;
-    alignas(16) mat4 view;
+    alignas(16) mat4 modelView;
     alignas(16) mat4 proj;
 };
 
@@ -425,8 +168,372 @@ public:
     {
         initWindow();
         initVulkan();
+        load();
         loop();
         cleanup();
+    }
+
+    struct Node;
+
+    struct Attribute
+    {
+        void* data;
+        size_t offset;
+        size_t stride;
+        VkFormat format;
+
+        Attribute(std::string dataPath, size_t offset, size_t stride, std::string format)
+        {
+            this->data = readFileWithCache(dataPath)->data();
+            this->offset = offset;
+            this->stride = stride;
+
+            if (format == "R32G32B32_SFLOAT")
+                this->format = VK_FORMAT_R32G32B32_SFLOAT;
+            else if (format == "R8G8B8A8_UNORM")
+                this->format = VK_FORMAT_R8G8B8A8_UNORM;
+        }
+    };
+
+    struct Mesh
+    {
+        Renderer* renderer;
+
+        std::string name;
+        size_t count;
+        VkPrimitiveTopology topology;
+        std::map<std::string, Attribute> attributes;
+
+        VkBuffer buffer;
+        VkDeviceMemory bufferMemory;
+
+        Mesh(Renderer* t, std::string name, size_t count, const std::string& topology)
+        {
+            this->name = name;
+            this->count = count;
+
+            if (topology == "POINT_LIST")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+            else if (topology == "LINE_LIST")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+            else if (topology == "LINE_STRIP")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+            else if (topology == "TRIANGLE_LIST")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            else if (topology == "TRIANGLE_STRIP")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+            else if (topology == "TRIANGLE_FAN")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+            else if (topology == "LINE_LIST_WITH_ADJACENCY")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
+            else if (topology == "LINE_STRIP_WITH_ADJACENCY")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
+            else if (topology == "TRIANGLE_LIST_WITH_ADJACENCY")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY;
+            else if (topology == "TRIANGLE_STRIP_WITH_ADJACENCY")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY;
+            else if (topology == "PATCH_LIST")
+                this->topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+
+            renderer = t;
+        }
+
+        void initialize()
+        {
+            VkBuffer stagingBuffer;
+            VkDeviceMemory stagingBufferMemory;
+
+            VkDeviceSize size = sizeof(Vertex) * count;
+            renderer->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+            void* data;
+            vkMapMemory(renderer->device, stagingBufferMemory, 0, size, 0, &data);
+            memcpy(data, (attributes.at("POSITION")).data, size);
+            vkUnmapMemory(renderer->device, stagingBufferMemory);
+
+            renderer->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, bufferMemory);
+            renderer->copyBuffer(stagingBuffer, buffer, size);
+
+            vkDestroyBuffer(renderer->device, stagingBuffer, null);
+            vkFreeMemory(renderer->device, stagingBufferMemory, null);
+        }
+
+        void draw(VkCommandBuffer commandBuffer, mat4 m)
+        {
+            VkBuffer vertexBuffers[] = { buffer };
+            VkDeviceSize offsets[] = { 0 };
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->pipelineLayout,
+                                    0, 1, &(renderer->descriptorSets[renderer->currentFrame]), 0, nullptr);
+
+            renderer->updateUniformBuffer(m, renderer->currentFrame);
+            vkCmdDraw(commandBuffer, count, 1, 0, 0);
+        }
+
+        ~Mesh()
+        {
+            vkDestroyBuffer(renderer->device, buffer, null);
+            vkFreeMemory(renderer->device, bufferMemory, null);
+        }
+    };
+
+    struct Camera
+    {
+        std::string name;
+        mat4 transform;
+        mat4 toTransform;
+        float aspectRatio;
+        float verticalFOV;
+        float nearPlane;
+        float farPlane;
+
+        explicit Camera(const std::string &name,
+                        float aspectRatio,
+                        float verticalFOV,
+                        float nearPlane,
+                        float farPlane = std::numeric_limits<float>::infinity())
+        {
+            this->name = name;
+            this->aspectRatio = aspectRatio;
+            this->verticalFOV = verticalFOV;
+            this->nearPlane = nearPlane;
+            this->farPlane = farPlane;
+        }
+
+        void computeTransform(float fovScale)
+        {
+            if (farPlane == std::numeric_limits<float>::infinity())
+                this->transform = mat4::infinitePerspective(aspectRatio, verticalFOV + fovScale, nearPlane);
+            else
+                this->transform = mat4::perspective(aspectRatio, verticalFOV + fovScale, nearPlane, farPlane);
+        }
+    };
+
+    struct Node
+    {
+        std::string name;
+        mat4 transform;
+        mat4 invTransform;
+        std::vector<Node*> children;
+        Camera* camera = null;
+        Mesh* mesh = null;
+
+        explicit Node(const std::string &name,
+                      vec3 translation = vec3(0.0f, 0.0f, 0.0f),
+                      vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 1.0f),
+                      vec3 scale = vec3(1.0f, 1.0f, 1.0f))
+        {
+            this->name = name;
+            this->transform = mat4::translation(translation) * mat4::rotate(rotation) * mat4::scale(scale);
+            this->invTransform = mat4::scale(vec3(1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z)) * mat4::rotate(vec4(rotation.xyz(), -rotation.w)) * mat4::translation(translation * -1.0f);
+        }
+
+        void draw(VkCommandBuffer b, mat4 m)
+        {
+            assert(this);
+            mat4 m2 = m * transform;
+            if (mesh != null)
+                mesh->draw(b, m2);
+
+            for (Node* n: children)
+            {
+                n->draw(b, m2);
+            }
+
+            meshesDrawn++;
+        }
+
+        void computeCamera(mat4 m)
+        {
+            mat4 m2 = invTransform * m;
+            if (camera != null)
+                camera->toTransform = m2;
+
+            for (Node* n: children)
+            {
+                n->computeCamera(m2);
+            }
+        }
+    };
+
+    struct Scene
+    {
+        std::string name;
+        std::vector<Node*> roots;
+
+        std::map<int, Node*> nodes;
+        std::map<int, Mesh*> meshes;
+        std::map<int, Camera*> cameras;
+
+        // todo free this
+        Camera* currentCamera = new Camera("default", 1.5, PI / 2, 1);
+
+        Scene(std::string name)
+        {
+            this->name = name;
+        }
+
+        ~Scene()
+        {
+            for (auto n: nodes)
+            {
+                delete n.second;
+            }
+
+            for (auto n: meshes)
+            {
+                delete n.second;
+            }
+
+            for (auto n: cameras)
+            {
+                delete n.second;
+            }
+        }
+    };
+
+    Scene* parseScene(jarray* sceneArray)
+    {
+        Scene* scene;
+        std::map<int, Node*> nodes;
+        std::map<int, Mesh*> meshes;
+        std::map<int, Camera*> cameras;
+        Camera* currentCam;
+
+        // Initialize
+        int i = 0;
+        for (jvalue* v: sceneArray->elements)
+        {
+            if (i == 0)
+            {
+                jstring* s = jstring::cast(v);
+                assert(s->value == "s72-v1");
+                i++;
+                continue;
+            }
+
+            jobject* o = jobject::cast(v);
+            std::string type = jstring::cast((*o)["type"])->value;
+            if (type == "SCENE")
+            {
+                scene = new Scene(jstring::cast((*o)["name"])->value);
+            }
+            else if (type == "NODE")
+            {
+                std::string name = jstring::cast((*o)["name"])->value;
+                vec3 translation = vec3(0.0f, 0.0f, 0.0f);
+                vec4 rotation = vec4(0.0f, 0.0f, 0.0f, 1.0f);
+                vec3 scale = vec3(1.0f, 1.0f, 1.0f);
+
+                jarray* jtranslation = jarray::cast((*o)["translation"]);
+                if (jtranslation != null)
+                    translation = vec3(jnumber::cast((*jtranslation)[0])->value, jnumber::cast((*jtranslation)[1])->value, jnumber::cast((*jtranslation)[2])->value);
+
+                jarray* jrotation = jarray::cast((*o)["rotation"]);
+                if (jrotation != null)
+                    rotation = vec4(jnumber::cast((*jrotation)[0])->value, jnumber::cast((*jrotation)[1])->value, jnumber::cast((*jrotation)[2])->value, jnumber::cast((*jrotation)[3])->value);
+
+                jarray* jscale = jarray::cast((*o)["scale"]);
+                if (jscale != null)
+                    scale = vec3(jnumber::cast((*jscale)[0])->value, jnumber::cast((*jscale)[1])->value, jnumber::cast((*jscale)[2])->value);
+
+                nodes.insert(std::pair(i, new Node(name, translation, rotation, scale)));
+            }
+            else if (type == "CAMERA")
+            {
+                std::string name = jstring::cast((*o)["name"])->value;
+                jobject* perspective = jobject::cast((*o)["perspective"]);
+                float aspect = jnumber::cast((*perspective)["aspect"])->value;
+                float vfov = jnumber::cast((*perspective)["vfov"])->value;
+                float near = jnumber::cast((*perspective)["near"])->value;
+                jnumber* far = jnumber::cast((*perspective)["far"]);
+
+                Camera* camera;
+
+                if (far != null)
+                    camera = new Camera(name, aspect, vfov, near, far->value);
+                else
+                    camera = new Camera(name, aspect, vfov, near);
+
+                cameras.insert(std::pair(i, camera));
+                currentCam = camera;
+            }
+            else if (type == "MESH")
+            {
+                std::string name = jstring::cast((*o)["name"])->value;
+                std::string topology = jstring::cast((*o)["name"])->value;
+                int count = (int) jnumber::cast((*o)["count"])->value;
+                jobject* attributes = jobject::cast((*o)["attributes"]);
+                Mesh* mesh = new Mesh(this, name, count, topology);
+
+                for (auto ap: attributes->elements)
+                {
+                    jobject* a = jobject::cast(ap.second);
+                    std::string src = jstring::cast((*a)["src"])->value;
+                    auto offset = (size_t) jnumber::cast((*a)["offset"])->value;
+                    auto stride = (size_t) jnumber::cast((*a)["stride"])->value;
+                    std::string format = jstring::cast((*a)["format"])->value;
+
+                    mesh->attributes.insert(std::pair(ap.first, Attribute(src, offset, stride, format)));
+                }
+
+                mesh->initialize();
+                meshes.insert(std::pair(i, mesh));
+            }
+
+            i++;
+        }
+
+        //Populate pointers
+        i = 0;
+        for (jvalue* v: sceneArray->elements)
+        {
+            if (i == 0)
+            {
+                i++;
+                continue;
+            }
+
+            jobject *o = static_cast<jobject *>(v);
+            std::string type = jstring::cast((*o)["type"])->value;
+            if (type == "SCENE")
+            {
+                jarray* roots = jarray::cast((*o)["roots"]);
+                for (jvalue* v: roots->elements)
+                {
+                    int n = (int) jnumber::cast(v)->value;
+                    scene->roots.emplace_back(nodes.at(n));
+                }
+            }
+            else if (type == "NODE")
+            {
+                jarray* kids = jarray::cast((*o)["children"]);
+                if (kids != null)
+                {
+                    for (jvalue *v: kids->elements)
+                    {
+                        int n = (int) jnumber::cast(v)->value;
+                        nodes[i]->children.emplace_back(nodes.at(n));
+                    }
+                }
+
+                jnumber* camera = jnumber::cast((*o)["camera"]);
+                if (camera != null)
+                    nodes[i]->camera = cameras.at((int) camera->value);
+
+                jnumber* mesh = jnumber::cast((*o)["mesh"]);
+                if (mesh != null)
+                    nodes[i]->mesh = meshes.at((int) mesh->value);
+            }
+
+            i++;
+        }
+
+        scene->nodes = nodes;
+        scene->cameras = cameras;
+        scene->meshes = meshes;
+        scene->currentCamera = currentCam;
+        return scene;
     }
 
 private:
@@ -454,6 +561,8 @@ private:
     VkPipelineLayout pipelineLayout;
     VkPipeline graphicsPipeline;
 
+    //VkPipelineLayout uniformLayout;
+
     std::vector<VkFramebuffer> swapChainFramebuffers;
 
     struct VertexBuffer;
@@ -475,10 +584,26 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
 
+    std::vector<int> keysPressed;
+    float cameraSpeedMod = 10.0;
+    float zoom = 0.0;
+
+    int mouseGrabbed = 0;
+
+    double mouseGrabX;
+    double mouseGrabY;
+    double mouseLastGrabX;
+    double mouseLastGrabY;
+
     u32 currentFrame = 0;
     bool framebufferResized = false;
 
     Scene* currentScene = null;
+
+    float frameTime = 0;
+    vec3 cameraPos = vec3(0, 0, 0);
+    vec2 cameraRot = vec2(0, 0);
+    float cameraSpeed = 1.0f;
 
     void initWindow()
     {
@@ -488,12 +613,58 @@ private:
         window = glfwCreateWindow(1960, 1080, "I love Vulkan!!!!!", null, null);
         glfwSetWindowUserPointer(window, this);
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+        glfwSetKeyCallback(window, keyCallback);
+        glfwSetMouseButtonCallback(window, mouseCallback);
+        glfwSetScrollCallback(window, scrollCallback);
     }
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
     {
         auto app = reinterpret_cast<Renderer*>(glfwGetWindowUserPointer(window));
         app->framebufferResized = true;
+    }
+
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
+    {
+        auto app = reinterpret_cast<Renderer*>(glfwGetWindowUserPointer(window));
+        if (action == GLFW_PRESS)
+            app->keysPressed.emplace_back(key);
+        else if (action == GLFW_RELEASE)
+            std::erase(app->keysPressed, key);
+    }
+
+    static void mouseCallback(GLFWwindow* window, int mouse, int action, int mods)
+    {
+        auto app = reinterpret_cast<Renderer*>(glfwGetWindowUserPointer(window));
+        if (action == GLFW_PRESS)
+        {
+            app->mouseGrabbed = 1;
+            glfwGetCursorPos(window, &app->mouseGrabX, &app->mouseGrabY);
+            app->mouseLastGrabX = app->mouseGrabX;
+            app->mouseLastGrabY = app->mouseGrabY;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+        else if (action == GLFW_RELEASE)
+        {
+            app->mouseGrabbed = 0;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            glfwSetCursorPos(window, app->mouseGrabX, app->mouseGrabY);
+        }
+    }
+
+    static void scrollCallback(GLFWwindow* window, double x, double y)
+    {
+        auto app = reinterpret_cast<Renderer*>(glfwGetWindowUserPointer(window));
+
+        if (app->keyDown(GLFW_KEY_LEFT_CONTROL))
+            app->cameraSpeedMod += (float) y;
+        else
+            app->zoom -= (float) y / 500.0f;
+    }
+
+    bool keyDown(int key)
+    {
+        return (std::find(keysPressed.begin(), keysPressed.end(), key) != keysPressed.end());
     }
 
     void initVulkan()
@@ -510,8 +681,6 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
-//        vertexBuffer = new VertexBuffer(this, vertices);
-//        vertexBuffer2 = new VertexBuffer(this, vertices2);
         createUniformBuffers();
         createDescriptorPool();
         createDescriptorSets();
@@ -1142,6 +1311,16 @@ private:
         pipelineLayoutInfo.setLayoutCount = 1;
         pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
 
+        // Adapted from https://vkguide.dev/docs/chapter-3/push_constants/
+        //VkPipelineLayoutCreateInfo uniformsPipelineInfo {};
+        //uniformsPipelineInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        VkPushConstantRange consts;
+        consts.offset = 0;
+        consts.size = sizeof(UniformBufferObject);
+        consts.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pipelineLayoutInfo.pPushConstantRanges = &consts;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+
         auto result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, null, &pipelineLayout);
         if (result != VK_SUCCESS)
         {
@@ -1303,56 +1482,6 @@ private:
         vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
     }
 
-    struct VertexBuffer
-    {
-        VkDevice device;
-        Renderer* t;
-
-        VkBuffer buffer;
-        VkDeviceMemory bufferMemory;
-
-        u32 verticesCount;
-
-        VertexBuffer(Renderer* t, const std::vector<Vertex> &vertices)
-        {
-            this->t = t;
-            this->device = t->device;
-            this->verticesCount = vertices.size();
-
-            VkBuffer stagingBuffer;
-            VkDeviceMemory stagingBufferMemory;
-
-            VkDeviceSize size = sizeof(vertices[0]) * vertices.size();
-            t->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-
-            void* data;
-            vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
-            memcpy(data, vertices.data(), size);
-            vkUnmapMemory(device, stagingBufferMemory);
-
-            t->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, bufferMemory);
-            t->copyBuffer(stagingBuffer, buffer, size);
-
-            vkDestroyBuffer(device, stagingBuffer, null);
-            vkFreeMemory(device, stagingBufferMemory, null);
-        }
-
-        void draw(VkCommandBuffer commandBuffer)
-        {
-            VkBuffer vertexBuffers[] = {buffer};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, t->pipelineLayout, 0, 1, &(t->descriptorSets[t->currentFrame]), 0, nullptr);
-            vkCmdDraw(commandBuffer, verticesCount, 1, 0, 0);
-        }
-
-        ~VertexBuffer()
-        {
-            vkDestroyBuffer(device, buffer, null);
-            vkFreeMemory(device, bufferMemory, null);
-        }
-    };
-
     u32 findMemoryType(u32 typeFilter, VkMemoryPropertyFlags props)
     {
         VkPhysicalDeviceMemoryProperties memProps;
@@ -1493,6 +1622,22 @@ private:
         viewport.y = 0.0f;
         viewport.width = static_cast<float>(swapChainExtent.width);
         viewport.height = static_cast<float>(swapChainExtent.height);
+
+        if (currentScene != null && currentScene->currentCamera != null)
+        {
+            float ar = currentScene->currentCamera->aspectRatio;
+            if (viewport.width > ar * viewport.height)
+            {
+                viewport.width = ar * viewport.height;
+                viewport.x = ((float) swapChainExtent.width - viewport.width) / 2.0f;
+            }
+            else
+            {
+                viewport.height = viewport.width / ar;
+                viewport.y = ((float) swapChainExtent.height - viewport.height) / 2.0f;
+            }
+        }
+
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -1502,6 +1647,27 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
+        static int i = 0;
+        i++;
+
+        mat4 transform = mat4::rotateAxis(vec3(1, 0, 0), cameraRot.y)
+                         * mat4::rotateAxis(vec3(0, 1, 0), cameraRot.x)
+                         * mat4::translation(cameraPos * -1)
+                         * currentScene->currentCamera->toTransform;
+
+        currentScene->currentCamera->computeTransform(zoom);
+        if (currentScene != null)
+        {
+            for (auto r: currentScene->roots)
+            {
+                r->computeCamera(mat4::I());
+            }
+
+            for (auto r: currentScene->roots)
+            {
+                r->draw(commandBuffer,transform);
+            }
+        }
 //        vertexBuffer->draw(commandBuffer);
 //        vertexBuffer2->draw(commandBuffer);
 
@@ -1539,19 +1705,84 @@ private:
         }
     }
 
+    void load()
+    {
+        std::string s = std::string(readFileWithCache("sg-Support.s72")->data());
+        jarray* o = jparse_array(s);
+        this->currentScene = parseScene(o);
+    }
+
     void loop()
     {
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
+            handleControls();
             drawFrame();
         }
 
         vkDeviceWaitIdle(device);
     }
 
+    void handleControls()
+    {
+        cameraSpeed = cameraSpeedMod;
+
+        //printf("%f\n", cameraSpeed);
+
+        mat4 rotation = mat4::rotateAxis(vec3(1, 0, 0), -cameraRot.y)
+                        * mat4::rotateAxis(vec3(0, 1, 0), -cameraRot.x);
+
+        vec3 x = (rotation * vec4(1, 0, 0, 1)).xyz();
+        vec3 y = (rotation * vec4(0, 1, 0, 1)).xyz();
+        vec3 z = (rotation * vec4(0, 0, 1, 1)).xyz();
+
+
+        if (keyDown(GLFW_KEY_W))
+            cameraPos = cameraPos - z * cameraSpeed * frameTime;
+
+        if (keyDown(GLFW_KEY_S))
+            cameraPos = cameraPos + z * cameraSpeed * frameTime;
+
+        if (keyDown(GLFW_KEY_A))
+            cameraPos = cameraPos - x * cameraSpeed * frameTime;
+
+        if (keyDown(GLFW_KEY_D))
+            cameraPos = cameraPos + x * cameraSpeed * frameTime;
+
+        if (keyDown(GLFW_KEY_SPACE))
+            cameraPos = cameraPos + y * cameraSpeed * frameTime;
+
+        if (keyDown(GLFW_KEY_LEFT_SHIFT))
+            cameraPos = cameraPos - y * cameraSpeed * frameTime;
+
+        if (keyDown(GLFW_KEY_ENTER))
+            cameraPos = vec3(0, 0, 0);
+
+        if (mouseGrabbed)
+        {
+            double x;
+            double y;
+            glfwGetCursorPos(window, &x, &y);
+
+            float scale = tan((currentScene->currentCamera->verticalFOV + zoom) / 2);
+            if (mouseGrabbed > 5)
+            {
+                cameraRot.x -= scale * (float) (((int) x - (int) mouseLastGrabX) / 500.0);
+                cameraRot.y -= scale * (float) (((int) y - (int) mouseLastGrabY) / 500.0);
+            }
+
+            mouseLastGrabX = x;
+            mouseLastGrabY = y;
+
+            mouseGrabbed++;
+        }
+    }
+
     void drawFrame()
     {
+        meshesDrawn = 0;
+        auto time = std::chrono::high_resolution_clock::now();
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         u32 imageIndex;
@@ -1572,8 +1803,6 @@ private:
 
         vkResetCommandBuffer(commandBuffers[currentFrame], 0);
         recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
-
-        updateUniformBuffer(currentFrame);
 
         VkSubmitInfo submitInfo {};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1619,25 +1848,32 @@ private:
             throw std::runtime_error("failed to present swap chain image!");
         }
 
+        auto end = std::chrono::high_resolution_clock::now();
         currentFrame = (currentFrame + 1) % max_frames_in_flight;
+        frameTime = (end - time).count() / 1000000000.0f;
+//        printf("drew %lu meshes in %lld\n", meshesDrawn, (end - time).count());
     };
 
-    void updateUniformBuffer(u32 currentImage)
+    void updateUniformBuffer(mat4 m, u32 currentImage)
     {
         static auto startTime = std::chrono::high_resolution_clock::now();
         auto currentTime = std::chrono::high_resolution_clock::now();
         float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
         UniformBufferObject ubo {};
-        ubo.model = mat4::rotateAxis(vec3(0.0f, 0.0f, 1.0f), PI / 2 * time);
-        ubo.view = mat4::lookAt(vec3(2.0f, 2.0f, 2.0f), vec3(0.0f, 0.0f, 0.0f), vec3(0.0f, 0.0f, 1.0f));
-        ubo.proj = mat4::perspective((float) swapChainExtent.width / (float) swapChainExtent.height, PI / 4, 0.1f, 10.0f);
-        memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+        ubo.modelView = m;
+        //ubo.view = mat4::I(); //mat4::lookAt(vec3(0.0f, 0.0f, 3.0f), vec3(0.0f, 0.0f, 1.0f), vec3(0.0f, 1.0f, 0.0f));
+        ubo.proj = currentScene->currentCamera->transform; //mat4::perspective((float) swapChainExtent.width / (float) swapChainExtent.height, PI / 4, 0.1f, 10.0f);
+        //memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+
+        // adapted from https://vkguide.dev/docs/chapter-3/push_constants/
+        vkCmdPushConstants(commandBuffers[currentFrame], pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ubo), &ubo);
     }
 
     void cleanup()
     {
-        // TODO: delete vert buffers
+        if (this->currentScene != null)
+            delete this->currentScene;
 
         cleanupSwapChain();
 
@@ -1652,6 +1888,7 @@ private:
 
         vkDestroyPipeline(device, graphicsPipeline, null);
         vkDestroyPipelineLayout(device, pipelineLayout, null);
+        //vkDestroyPipelineLayout(device, uniformLayout, null);
 
         vkDestroyRenderPass(device, renderPass, null);
 
@@ -1713,10 +1950,6 @@ private:
 
 int main()
 {
-    std::string s = std::string(readFileWithCache("sphereflake.s72")->data());
-    jarray* o = jparse_array(s);
-    parseScene(o);
-
     Renderer app;
 
     try

@@ -40,7 +40,7 @@ struct Vec2 : vec<T, Vec2<T> >
         this->y = y;
     }
 
-    Vec2<T>(Mat<T, 1, 2> &m)
+    Vec2<T>(Mat<T, 1, 2> m)
     {
         this->x = m[0][0];
         this->y = m[0][1];
@@ -53,16 +53,16 @@ struct Vec2 : vec<T, Vec2<T> >
 
     Vec2<T> normalize()
     {
-        return this / this->length();
+        return *this / this->length();
     }
 
-    T dot(const Vec2<T> &o)
+    T dot(Vec2<T>o)
     {
         return this->x * o.x + this->y * o.y;
     }
 
     template<T op(const T&, const T&)>
-    static inline Vec2<T> operate(const Vec2<T> &a, const Vec2<T> &b)
+    static inline Vec2<T> operate(Vec2<T>a, Vec2<T>b)
     {
         return Vec2
         (
@@ -72,7 +72,7 @@ struct Vec2 : vec<T, Vec2<T> >
     }
 
     template<T op(const T&, const T&)>
-    static inline Vec2<T> operate(const Vec2<T> &a, T b)
+    static inline Vec2<T> operate(Vec2<T>a, T b)
     {
         return Vec2
         (
@@ -98,21 +98,21 @@ struct Vec3 : vec<T, Vec3<T> >
         this->z = z;
     }
 
-    Vec3(Vec2<T> &xy, T z)
+    Vec3(Vec2<T>xy, T z)
     {
         this->x = xy.x;
         this->y = xy.y;
         this->z = z;
     }
 
-    Vec3(T x, Vec2<T> &yz)
+    Vec3(T x, Vec2<T>yz)
     {
         this->x = x;
         this->y = yz.x;
         this->z = yz.y;
     }
 
-    Vec3<T>(Mat<T, 1, 3> &m)
+    Vec3<T>(Mat<T, 1, 3> m)
     {
         this->x = m[0][0];
         this->y = m[0][1];
@@ -134,18 +134,18 @@ struct Vec3 : vec<T, Vec3<T> >
         return *this / this->length();
     }
 
-    Vec3<T> cross(Vec3<T> &o)
+    Vec3<T> cross(Vec3<T>o)
     {
         return Vec3(this->y * o.z - this->z * o.y, o.x * this->z - o.z * this->x, this->x * o.y - this->y * o.x);
     }
 
-    T dot(Vec3<T> &o)
+    T dot(Vec3<T>o)
     {
         return this->x * o.x + this->y * o.y + this->z * o.z;
     }
 
     template<T op(const T&, const T&)>
-    static inline Vec3<T> operate(const Vec3<T> &a, const Vec3<T> &b)
+    static inline Vec3<T> operate(Vec3<T>a, Vec3<T>b)
     {
         return Vec3
         (
@@ -156,7 +156,7 @@ struct Vec3 : vec<T, Vec3<T> >
     }
 
     template<T op(const T&, const T&)>
-    static inline Vec3<T> operate(const Vec3<T> &a, const T b)
+    static inline Vec3<T> operate(Vec3<T>a, const T b)
     {
         return Vec3
         (
@@ -185,7 +185,7 @@ struct Vec4 : vec<T, Vec4<T> >
         this->w = w;
     }
 
-    Vec4(Vec3<T> &xyz, T w)
+    Vec4(Vec3<T>xyz, T w)
     {
         this->x = xyz.x;
         this->y = xyz.y;
@@ -193,7 +193,7 @@ struct Vec4 : vec<T, Vec4<T> >
         this->w = w;
     }
 
-    Vec4(T x, Vec3<T> &yzw)
+    Vec4(T x, Vec3<T>yzw)
     {
         this->x = x;
         this->y = yzw.x;
@@ -201,7 +201,7 @@ struct Vec4 : vec<T, Vec4<T> >
         this->w = yzw.z;
     }
 
-    Vec4(Vec2<T> &xy, Vec2<T> &zw)
+    Vec4(Vec2<T>xy, Vec2<T>zw)
     {
         this->x = xy.x;
         this->y = xy.y;
@@ -209,7 +209,7 @@ struct Vec4 : vec<T, Vec4<T> >
         this->w = zw.y;
     }
 
-    Vec4(Vec2<T> &xy, T z, T w)
+    Vec4(Vec2<T>xy, T z, T w)
     {
         this->x = xy.x;
         this->y = xy.y;
@@ -217,7 +217,7 @@ struct Vec4 : vec<T, Vec4<T> >
         this->w = w;
     }
 
-    Vec4(T x, Vec2<T> &xy, T w)
+    Vec4(T x, Vec2<T>xy, T w)
     {
         this->x = x;
         this->y = xy.x;
@@ -225,7 +225,7 @@ struct Vec4 : vec<T, Vec4<T> >
         this->w = w;
     }
 
-    Vec4(T x, T y, Vec2<T> &xy)
+    Vec4(T x, T y, Vec2<T>xy)
     {
         this->x = x;
         this->y = y;
@@ -233,7 +233,7 @@ struct Vec4 : vec<T, Vec4<T> >
         this->w = xy.y;
     }
 
-    Vec4<T>(Mat<T, 1, 4> &m)
+    Vec4<T>(Mat<T, 1, 4> m)
     {
         this->x = m[0][0];
         this->y = m[0][1];
@@ -258,16 +258,16 @@ struct Vec4 : vec<T, Vec4<T> >
 
     Vec4<T> normalize()
     {
-        return this / this->length();
+        return *this / this->length();
     }
 
-    T dot(const Vec4<T> &o)
+    T dot(Vec4<T>o)
     {
         return this->x * o.x + this->y * o.y + this->z * o.z + this->w * o.w;
     }
 
     template<T op(const T&, const T&)>
-    static inline Vec4<T> operate(const Vec4<T> &a, const Vec4<T> &b)
+    static inline Vec4<T> operate(Vec4<T>a, Vec4<T>b)
     {
         return Vec4
         (
@@ -279,7 +279,7 @@ struct Vec4 : vec<T, Vec4<T> >
     }
 
     template<T op(const T&, const T&)>
-    static inline Vec4<T> operate(const Vec4<T> &a, const T b)
+    static inline Vec4<T> operate(Vec4<T>a, const T b)
     {
         return Vec4
         (
@@ -296,20 +296,20 @@ struct Mat
 {
     T data[x][y];
 
-    Mat<T, 1, 2>(Vec2<T> v)
+    Mat<T, 1, 2>(Vec2<T>v)
     {
         data[0][0] = v.x;
         data[0][1] = v.y;
     }
 
-    Mat<T, 1, 3>(Vec3<T> v)
+    Mat<T, 1, 3>(Vec3<T>v)
     {
         data[0][0] = v.x;
         data[0][1] = v.y;
         data[0][2] = v.z;
     }
 
-    Mat<T, 1, 4>(Vec4<T> v)
+    Mat<T, 1, 4>(Vec4<T>v)
     {
         data[0][0] = v.x;
         data[0][1] = v.y;
@@ -336,7 +336,7 @@ struct Mat
         data[1][1] = d;
     }
 
-    Mat<T, 2, 2>(Vec2<T> a, Vec2<T> b)
+    Mat<T, 2, 2>(Vec2<T>a, Vec2<T> const &b)
     {
         data[0][0] = a.x;
         data[0][1] = a.y;
@@ -359,7 +359,7 @@ struct Mat
         data[2][2] = i;
     }
 
-    Mat<T, 3, 3>(Vec3<T> a, Vec3<T> b, Vec3<T> c)
+    Mat<T, 3, 3>(Vec3<T>a, Vec3<T>b, Vec3<T>c)
     {
         data[0][0] = a.x;
         data[0][1] = a.y;
@@ -397,7 +397,7 @@ struct Mat
         data[3][3] = p;
     }
 
-    Mat<T, 4, 4>(Vec4<T> a, Vec4<T> b, Vec4<T> c, Vec4<T> d)
+    Mat<T, 4, 4>(Vec4<T>a, Vec4<T>b, Vec4<T>c, Vec4<T>d)
     {
         data[0][0] = a.x;
         data[0][1] = a.y;
@@ -459,7 +459,7 @@ struct Mat
         return m;
     }
 
-    static inline Mat<T, 4, 4> translation(Vec3<T> trans)
+    static inline Mat<T, 4, 4> translation(Vec3<T>trans)
     {
         return translation(trans.x, trans.y, trans.z);
     }
@@ -474,7 +474,7 @@ struct Mat
         return m;
     }
 
-    static inline Mat<T, 4, 4> scale(Vec3<T> s)
+    static inline Mat<T, 4, 4> scale(Vec3<T>s)
     {
         return scale(s.x, s.y, s.z);
     }
@@ -500,20 +500,20 @@ struct Mat
         return m;
     }
 
-    static inline Mat<T, 4, 4> rotate(Vec4<T> r)
+    static inline Mat<T, 4, 4> rotate(Vec4<T>r)
     {
         return rotate(r.x, r.y, r.z, r.w);
     }
 
     // Quaternion rotation
     // Adapted from https://www.euclideanspace.com/maths/geometry/rotations/conversions/angleToQuaternion/index.htm
-    static inline Mat<T, 4, 4> rotateAxis(Vec3<T> axis, T angle)
+    static inline Mat<T, 4, 4> rotateAxis(Vec3<T>axis, T angle)
     {
         return rotate(axis.x * sin(angle / 2), axis.y * sin(angle / 2), axis.z * sin(angle / 2), cos(angle / 2));
     }
 
     // Adapted from https://github.com/g-truc/glm/blob/4eb3fe1d7d8fd407cc7ccfa801a0311bb7dd281c/glm/ext/matrix_transform.inl#L153
-    static inline Mat<T, 4, 4> lookAt(Vec3<float> eyePos, Vec3<T> centerLookAtPos, Vec3<T> upVec)
+    static inline Mat<T, 4, 4> lookAt(Vec3<T> eyePos, Vec3<T> centerLookAtPos, Vec3<T> upVec)
     {
         Vec3<T> f = (centerLookAtPos - eyePos).normalize();
         Vec3<T> up = upVec.normalize();
@@ -550,20 +550,35 @@ struct Mat
     }
 
     template<int z>
-    Mat<T, y, z> operator* (Mat<T, z, x> m)
+    Mat<T, z, y> operator* (Mat<T, z, x> m)
     {
-        Mat<T, y, z> result;
+        Mat<T, z, y> result;
         for (int iy = 0; iy < y; iy++)
         {
             for (int iz = 0; iz < z; iz++)
             {
                 for (int ix = 0; ix < x; ix++)
                 {
-                    result[iy][iz] += (*this)[ix][iy] * m[iz][ix];
+                    result[iz][iy] += (*this)[ix][iy] * m[iz][ix];
                 }
             }
         }
         return result;
+    }
+
+    Vec4<T> operator* (Vec4<T> v)
+    {
+        return *this * Mat<T, 1, 4>(v);
+    }
+
+    Vec3<T> operator* (Vec3<T> v)
+    {
+        return *this * Mat<T, 1, 3>(v);
+    }
+
+    Vec2<T> operator* (Vec2<T> v)
+    {
+        return *this * Mat<T, 1, 2>(v);
     }
 };
 
