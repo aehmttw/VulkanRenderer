@@ -15,11 +15,11 @@
 #include "json.hpp"
 
 #define null nullptr
-//#define null NULL
 
 typedef uint32_t u32;
 
 static size_t meshesDrawn;
+static size_t meshesCulled;
 
 const std::vector<const char*> validationLayers =
         {
@@ -205,6 +205,8 @@ public:
         VkPrimitiveTopology topology;
         std::map<std::string, Attribute> attributes;
 
+        vec3 corners[2][2][2];
+
         VkBuffer buffer;
         VkDeviceMemory bufferMemory;
 
@@ -247,10 +249,55 @@ public:
             VkDeviceSize size = sizeof(Vertex) * count;
             renderer->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
+            Attribute pos = attributes.at("POSITION");
             void* data;
             vkMapMemory(renderer->device, stagingBufferMemory, 0, size, 0, &data);
-            memcpy(data, (attributes.at("POSITION")).data, size);
+            memcpy(data, pos.data, size);
             vkUnmapMemory(renderer->device, stagingBufferMemory);
+
+            char* datac = (char*) data;
+            float minX = std::numeric_limits<float>::infinity();
+            float minY = std::numeric_limits<float>::infinity();;
+            float minZ = std::numeric_limits<float>::infinity();;
+
+            float maxX = -std::numeric_limits<float>::infinity();;
+            float maxY = -std::numeric_limits<float>::infinity();;
+            float maxZ = -std::numeric_limits<float>::infinity();;
+            for (size_t i = pos.offset; i < size; i += pos.stride)
+            {
+                float x = *((float*) (&(datac[i])));
+                float y = *((float*) (&(datac[i + sizeof(float)])));
+                float z = *((float*) (&(datac[i + sizeof(float) * 2])));
+
+                if (x < minX)
+                    minX = x;
+
+                if (y < minY)
+                    minY = y;
+
+                if (z < minZ)
+                    minZ = z;
+
+                if (x > maxX)
+                    maxX = x;
+
+                if (y > maxY)
+                    maxY = y;
+
+                if (z > maxZ)
+                    maxZ = z;
+            }
+
+            for (int i = 0; i < 2; i++)
+            {
+                for (int j = 0; j < 2; j++)
+                {
+                    for (int k = 0; k < 2; k++)
+                    {
+                        this->corners[i][j][k] = vec3(i == 0 ? minX : maxX, j == 0 ? minY : maxY, k == 0 ? minZ : maxZ);
+                    }
+                }
+            }
 
             renderer->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, bufferMemory);
             renderer->copyBuffer(stagingBuffer, buffer, size);
@@ -281,12 +328,27 @@ public:
     struct Camera
     {
         std::string name;
-        mat4 transform;
-        mat4 toTransform;
+
+        // Frustum projection
+        mat4 perspectiveTransform;
+        // Derived from node scene graph transform
+        mat4 worldToCameraBaseTransform;
+        // Controlled by the user
+        mat4 cameraUserOffsetTransform;
+        // Everything
+        mat4 fullTransform;
+
         float aspectRatio;
         float verticalFOV;
+        float verticalFOVScaled;
+        float verticalFOVTan;
         float nearPlane;
         float farPlane;
+
+        vec3 position = vec3(0, 0, 0);
+        mat4 rotation = mat4::I();
+        mat4 rotationInverse = mat4::I();
+        float speed = 1.0f;
 
         explicit Camera(const std::string &name,
                         float aspectRatio,
@@ -299,14 +361,24 @@ public:
             this->verticalFOV = verticalFOV;
             this->nearPlane = nearPlane;
             this->farPlane = farPlane;
+            this->computeTransform(0);
         }
 
         void computeTransform(float fovScale)
         {
             if (farPlane == std::numeric_limits<float>::infinity())
-                this->transform = mat4::infinitePerspective(aspectRatio, verticalFOV + fovScale, nearPlane);
+                this->perspectiveTransform = mat4::infinitePerspective(aspectRatio, verticalFOV + fovScale, nearPlane);
             else
-                this->transform = mat4::perspective(aspectRatio, verticalFOV + fovScale, nearPlane, farPlane);
+                this->perspectiveTransform = mat4::perspective(aspectRatio, verticalFOV + fovScale, nearPlane, farPlane);
+
+            this->verticalFOVScaled = verticalFOV + fovScale;
+            this->verticalFOVTan = tan(verticalFOVScaled / 2);
+        }
+
+        void updateTransform()
+        {
+            cameraUserOffsetTransform = rotation * mat4::translation(position * -1) * worldToCameraBaseTransform;
+            fullTransform = perspectiveTransform * cameraUserOffsetTransform;
         }
     };
 
@@ -318,6 +390,7 @@ public:
         std::vector<Node*> children;
         Camera* camera = null;
         Mesh* mesh = null;
+        float maxScale = 0;
 
         explicit Node(const std::string &name,
                       vec3 translation = vec3(0.0f, 0.0f, 0.0f),
@@ -327,28 +400,79 @@ public:
             this->name = name;
             this->transform = mat4::translation(translation) * mat4::rotate(rotation) * mat4::scale(scale);
             this->invTransform = mat4::scale(vec3(1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z)) * mat4::rotate(vec4(rotation.xyz(), -rotation.w)) * mat4::translation(translation * -1.0f);
+            this->maxScale = std::max(std::max(scale.x, scale.y), scale.z);
         }
 
-        void draw(VkCommandBuffer b, mat4 m)
+        void draw(VkCommandBuffer b, mat4 m, Camera* camera)
         {
             assert(this);
+
             mat4 m2 = m * transform;
             if (mesh != null)
-                mesh->draw(b, m2);
+            {
+                mat4 t = camera->cameraUserOffsetTransform * m2;
+
+                vec3 minPos;
+                vec3 maxPos;
+
+                for (int i = 0; i < 2; i++)
+                {
+                    for (int j = 0; j < 2; j++)
+                    {
+                        for (int k = 0; k < 2; k++)
+                        {
+                            vec4 pos = (t * vec4(mesh->corners[i][j][k], 1.0f));
+
+                            if (i == 0 && j == 0 && k == 0)
+                            {
+                                minPos = pos.xyz();
+                                maxPos = pos.xyz();
+                                minPos.z = -pos.z;
+                                maxPos.z = -pos.z;
+                            }
+                            else
+                            {
+                                minPos = vec3(std::min(pos.x, minPos.x), std::min(pos.y, minPos.y),std::min(-pos.z, minPos.z));
+                                maxPos = vec3(std::max(pos.x, maxPos.x), std::max(pos.y, maxPos.y),std::max(-pos.z, maxPos.z));
+                            }
+                        }
+                    }
+                }
+
+                bool culled = false;
+                if (minPos.z < camera->nearPlane || maxPos.z > camera->farPlane)
+                    culled = true;
+                else
+                {
+                    float z = std::min(maxPos.z, camera->farPlane);
+                    float y = camera->verticalFOVTan * z;
+                    float x = y * camera->aspectRatio;
+                    culled = maxPos.y < -y || minPos.y > y || maxPos.x < -x || minPos.x > x;
+                }
+
+                if (culled)
+                    meshesCulled++;
+                else
+                {
+                    meshesDrawn++;
+                    mesh->draw(b, m2);
+                }
+            }
 
             for (Node* n: children)
             {
-                n->draw(b, m2);
+                n->draw(b, m2, camera);
             }
-
-            meshesDrawn++;
         }
 
         void computeCamera(mat4 m)
         {
             mat4 m2 = invTransform * m;
             if (camera != null)
-                camera->toTransform = m2;
+            {
+                camera->worldToCameraBaseTransform = m2;
+                camera->updateTransform();
+            }
 
             for (Node* n: children)
             {
@@ -366,7 +490,6 @@ public:
         std::map<int, Mesh*> meshes;
         std::map<int, Camera*> cameras;
 
-        // todo free this
         Camera* currentCamera = new Camera("default", 1.5, PI / 2, 1);
 
         Scene(std::string name)
@@ -533,9 +656,17 @@ public:
         scene->nodes = nodes;
         scene->cameras = cameras;
         scene->meshes = meshes;
-        scene->currentCamera = currentCam;
+
+        if (currentCam != null)
+        {
+            delete scene->currentCamera;
+            scene->currentCamera = currentCam;
+        }
+
         return scene;
     }
+
+    char* sceneName = null;
 
 private:
     GLFWwindow* window;
@@ -604,13 +735,9 @@ private:
     u32 currentFrame = 0;
     bool framebufferResized = false;
 
-    Scene* currentScene = null;
+    Scene* scene = null;
 
     float frameTime = 0;
-    vec3 cameraPos = vec3(0, 0, 0);
-    mat4 cameraRot = mat4::I();
-    mat4 cameraRotInv = mat4::I();
-    float cameraSpeed = 1.0f;
 
     void initWindow()
     {
@@ -1864,9 +1991,9 @@ private:
         viewport.width = static_cast<float>(swapChainExtent.width);
         viewport.height = static_cast<float>(swapChainExtent.height);
 
-        if (currentScene != null && currentScene->currentCamera != null)
+        if (scene != null && scene->currentCamera != null)
         {
-            float ar = currentScene->currentCamera->aspectRatio;
+            float ar = scene->currentCamera->aspectRatio;
             if (viewport.width > ar * viewport.height)
             {
                 viewport.width = ar * viewport.height;
@@ -1891,21 +2018,19 @@ private:
         static int i = 0;
         i++;
 
-        mat4 transform = cameraRot
-                         * mat4::translation(cameraPos * -1)
-                         * currentScene->currentCamera->toTransform;
+        mat4 transform = mat4::I();
 
-        currentScene->currentCamera->computeTransform(zoom);
-        if (currentScene != null)
+        scene->currentCamera->computeTransform(zoom);
+        if (scene != null)
         {
-            for (auto r: currentScene->roots)
+            for (auto r: scene->roots)
             {
                 r->computeCamera(mat4::I());
             }
 
-            for (auto r: currentScene->roots)
+            for (auto r: scene->roots)
             {
-                r->draw(commandBuffer,transform);
+                r->draw(commandBuffer, transform, scene->currentCamera);
             }
         }
 //        vertexBuffer->draw(commandBuffer);
@@ -1947,9 +2072,9 @@ private:
 
     void load()
     {
-        std::string s = std::string(readFileWithCache("sg-Support.s72")->data());
+        std::string s = std::string(readFileWithCache(this->sceneName)->data());
         jarray* o = jparse_array(s);
-        this->currentScene = parseScene(o);
+        this->scene = parseScene(o);
     }
 
     void loop()
@@ -1966,34 +2091,38 @@ private:
 
     void handleControls()
     {
-        cameraSpeed = cameraSpeedMod;
+        Camera* c = scene->currentCamera;
+        c->speed = cameraSpeedMod;
 
-        //printf("%f\n", cameraSpeed);
-
-        vec3 x = (cameraRotInv * vec4(1, 0, 0, 1)).xyz();
-        vec3 y = (cameraRotInv * vec4(0, 1, 0, 1)).xyz();
-        vec3 z = (cameraRotInv * vec4(0, 0, 1, 1)).xyz();
+        vec3 x = (c->rotationInverse * vec4(1, 0, 0, 1)).xyz();
+        vec3 y = (c->rotationInverse * vec4(0, 1, 0, 1)).xyz();
+        vec3 z = (c->rotationInverse * vec4(0, 0, 1, 1)).xyz();
 
         if (keyDown(GLFW_KEY_W))
-            cameraPos = cameraPos - z * cameraSpeed * frameTime;
+            c->position = c->position - z * c->speed * frameTime;
 
         if (keyDown(GLFW_KEY_S))
-            cameraPos = cameraPos + z * cameraSpeed * frameTime;
+            c->position = c->position + z * c->speed * frameTime;
 
         if (keyDown(GLFW_KEY_A))
-            cameraPos = cameraPos - x * cameraSpeed * frameTime;
+            c->position = c->position - x * c->speed * frameTime;
 
         if (keyDown(GLFW_KEY_D))
-            cameraPos = cameraPos + x * cameraSpeed * frameTime;
+            c->position = c->position + x * c->speed * frameTime;
 
         if (keyDown(GLFW_KEY_SPACE))
-            cameraPos = cameraPos + y * cameraSpeed * frameTime;
+            c->position = c->position + y * c->speed * frameTime;
 
         if (keyDown(GLFW_KEY_LEFT_SHIFT))
-            cameraPos = cameraPos - y * cameraSpeed * frameTime;
+            c->position = c->position - y * c->speed * frameTime;
 
         if (keyDown(GLFW_KEY_ENTER))
-            cameraPos = vec3(0, 0, 0);
+        {
+            c->position = vec3(0, 0, 0);
+            c->rotation = mat4::I();
+            c->rotationInverse = mat4::I();
+            zoom = 0;
+        }
 
         if (mouseGrabbed)
         {
@@ -2001,24 +2130,25 @@ private:
             double y;
             glfwGetCursorPos(window, &x, &y);
 
-            float scale = tan((currentScene->currentCamera->verticalFOV + zoom) / 2);
+            float scale = tan((scene->currentCamera->verticalFOV + zoom) / 2);
+
             if (mouseGrabbed > 5)
             {
                 if (keyDown(GLFW_KEY_LEFT_CONTROL) || rightMouseDown)
                 {
-                    cameraRot = mat4::rotateAxis(vec3(0, 0, 1), (float) (((int) x - (int) mouseLastGrabX) / 500.0)) * cameraRot;
-                    cameraRotInv = cameraRotInv * mat4::rotateAxis(vec3(0, 0, 1), (float) (-((int) x - (int) mouseLastGrabX) / 500.0));
+                    c->rotation = mat4::rotateAxis(vec3(0, 0, 1), (float) (((int) x - (int) mouseLastGrabX) / 500.0)) * c->rotation;
+                    c->rotationInverse = c->rotationInverse * mat4::rotateAxis(vec3(0, 0, 1), (float) (-((int) x - (int) mouseLastGrabX) / 500.0));
                 }
                 else
                 {
-                    cameraRot =
+                    c->rotation =
                             mat4::rotateAxis(vec3(0, 1, 0),
                                              scale * (float) (((int) x - (int) mouseLastGrabX) / 500.0)) *
                             mat4::rotateAxis(vec3(1, 0, 0),
                                              scale * (float) (((int) y - (int) mouseLastGrabY) / 500.0)) *
-                            cameraRot;
-                    cameraRotInv =
-                            cameraRotInv * mat4::rotateAxis(vec3(1, 0, 0),
+                            c->rotation;
+                    c->rotationInverse =
+                            c->rotationInverse * mat4::rotateAxis(vec3(1, 0, 0),
                                              scale * (float) (-((int) y - (int) mouseLastGrabY) / 500.0)) *
                             mat4::rotateAxis(vec3(0, 1, 0),
                                              scale * (float) (-((int) x - (int) mouseLastGrabX) / 500.0));
@@ -2035,6 +2165,8 @@ private:
     void drawFrame()
     {
         meshesDrawn = 0;
+        meshesCulled = 0;
+
         auto time = std::chrono::high_resolution_clock::now();
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
@@ -2104,7 +2236,7 @@ private:
         auto end = std::chrono::high_resolution_clock::now();
         currentFrame = (currentFrame + 1) % max_frames_in_flight;
         frameTime = (end - time).count() / 1000000000.0f;
-//        printf("drew %lu meshes in %lld\n", meshesDrawn, (end - time).count());
+        printf("drew %lu meshes in %lld (%lu culled)\n", meshesDrawn, (end - time).count(), meshesCulled);
     };
 
     void updateUniformBuffer(mat4 m, u32 currentImage)
@@ -2116,7 +2248,7 @@ private:
         UniformBufferObject ubo {};
         ubo.modelView = m;
         //ubo.view = mat4::I(); //mat4::lookAt(vec3(0.0f, 0.0f, 3.0f), vec3(0.0f, 0.0f, 1.0f), vec3(0.0f, 1.0f, 0.0f));
-        ubo.proj = currentScene->currentCamera->transform; //mat4::perspective((float) swapChainExtent.width / (float) swapChainExtent.height, PI / 4, 0.1f, 10.0f);
+        ubo.proj = scene->currentCamera->fullTransform; //mat4::perspective((float) swapChainExtent.width / (float) swapChainExtent.height, PI / 4, 0.1f, 10.0f);
         //memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
 
         // adapted from https://vkguide.dev/docs/chapter-3/push_constants/
@@ -2125,8 +2257,8 @@ private:
 
     void cleanup()
     {
-        if (this->currentScene != null)
-            delete this->currentScene;
+        if (this->scene != null)
+            delete this->scene;
 
         cleanupSwapChain();
 
@@ -2205,9 +2337,23 @@ private:
 
 };
 
-int main()
+int main(int argc, char** args)
 {
+    char* scene = null;
+    for (int i = 0; i < argc; i++)
+    {
+        if (strncmp(args[i], "--scene", 7) == 0 && i + 1 < argc)
+            scene = args[i + 1];
+    }
+
+    if (scene == null)
+    {
+        printf("Please specify scene with --scene <scene>!\n");
+        abort();
+    }
+
     Renderer app;
+    app.sceneName = scene;
 
     try
     {

@@ -32,7 +32,11 @@ struct Vec2 : vec<T, Vec2<T> >
     T x;
     T y;
 
-    Vec2() = default;
+    Vec2()
+    {
+        x = 0;
+        y = 0;
+    }
 
     Vec2(T x, T y)
     {
@@ -89,7 +93,12 @@ struct Vec3 : vec<T, Vec3<T> >
     T y;
     T z;
 
-    Vec3() = default;
+    Vec3()
+    {
+        x = 0;
+        y = 0;
+        z = 0;
+    }
 
     Vec3(T x, T y, T z)
     {
@@ -175,7 +184,13 @@ struct Vec4 : vec<T, Vec4<T> >
     T z;
     T w;
 
-    Vec4() = default;
+    Vec4()
+    {
+        x = 0;
+        y = 0;
+        z = 0;
+        w = 0;
+    }
 
     Vec4(T x, T y, T z, T w)
     {
@@ -568,17 +583,17 @@ struct Mat
 
     Vec4<T> operator* (Vec4<T> v)
     {
-        return *this * Mat<T, 1, 4>(v);
+        return Vec4<T>((*this) * Mat<T, 1, 4>(v));
     }
 
     Vec3<T> operator* (Vec3<T> v)
     {
-        return *this * Mat<T, 1, 3>(v);
+        return Vec4<T>((*this) * Mat<T, 1, 3>(v));
     }
 
     Vec2<T> operator* (Vec2<T> v)
     {
-        return *this * Mat<T, 1, 2>(v);
+        return Vec4<T>((*this) * Mat<T, 1, 2>(v));
     }
 };
 
