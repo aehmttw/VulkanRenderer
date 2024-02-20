@@ -311,20 +311,20 @@ struct Mat
 {
     T data[x][y];
 
-    Mat<T, 1, 2>(Vec2<T>v)
+    Mat<T, 1, 2>(Vec2<T> v)
     {
         data[0][0] = v.x;
         data[0][1] = v.y;
     }
 
-    Mat<T, 1, 3>(Vec3<T>v)
+    Mat<T, 1, 3>(Vec3<T> v)
     {
         data[0][0] = v.x;
         data[0][1] = v.y;
         data[0][2] = v.z;
     }
 
-    Mat<T, 1, 4>(Vec4<T>v)
+    Mat<T, 1, 4>(Vec4<T> v)
     {
         data[0][0] = v.x;
         data[0][1] = v.y;
@@ -351,7 +351,7 @@ struct Mat
         data[1][1] = d;
     }
 
-    Mat<T, 2, 2>(Vec2<T>a, Vec2<T> const &b)
+    Mat<T, 2, 2>(Vec2<T> a, Vec2<T> const &b)
     {
         data[0][0] = a.x;
         data[0][1] = a.y;
@@ -374,7 +374,7 @@ struct Mat
         data[2][2] = i;
     }
 
-    Mat<T, 3, 3>(Vec3<T>a, Vec3<T>b, Vec3<T>c)
+    Mat<T, 3, 3>(Vec3<T> a, Vec3<T> b, Vec3<T> c)
     {
         data[0][0] = a.x;
         data[0][1] = a.y;
@@ -412,7 +412,7 @@ struct Mat
         data[3][3] = p;
     }
 
-    Mat<T, 4, 4>(Vec4<T>a, Vec4<T>b, Vec4<T>c, Vec4<T>d)
+    Mat<T, 4, 4>(Vec4<T> a, Vec4<T> b, Vec4<T> c, Vec4<T> d)
     {
         data[0][0] = a.x;
         data[0][1] = a.y;
@@ -435,7 +435,7 @@ struct Mat
         data[3][3] = d.w;
     }
 
-    T* operator[](size_t e)
+    T *operator[](size_t e)
     {
         return data[e];
     }
@@ -474,7 +474,7 @@ struct Mat
         return m;
     }
 
-    static inline Mat<T, 4, 4> translation(Vec3<T>trans)
+    static inline Mat<T, 4, 4> translation(Vec3<T> trans)
     {
         return translation(trans.x, trans.y, trans.z);
     }
@@ -489,7 +489,7 @@ struct Mat
         return m;
     }
 
-    static inline Mat<T, 4, 4> scale(Vec3<T>s)
+    static inline Mat<T, 4, 4> scale(Vec3<T> s)
     {
         return scale(s.x, s.y, s.z);
     }
@@ -515,14 +515,14 @@ struct Mat
         return m;
     }
 
-    static inline Mat<T, 4, 4> rotate(Vec4<T>r)
+    static inline Mat<T, 4, 4> rotate(Vec4<T> r)
     {
         return rotate(r.x, r.y, r.z, r.w);
     }
 
     // Quaternion rotation
     // Adapted from https://www.euclideanspace.com/maths/geometry/rotations/conversions/angleToQuaternion/index.htm
-    static inline Mat<T, 4, 4> rotateAxis(Vec3<T>axis, T angle)
+    static inline Mat<T, 4, 4> rotateAxis(Vec3<T> axis, T angle)
     {
         return rotate(axis.x * sin(angle / 2), axis.y * sin(angle / 2), axis.z * sin(angle / 2), cos(angle / 2));
     }
@@ -535,7 +535,8 @@ struct Mat
         Vec3<T> s = f.cross(up).normalize();
         Vec3<T> u = s.cross(f);
 
-        return Mat<T, 4, 4>(s.x, u.x, -f.x, 0,  s.y, u.y, -f.y, 0,  s.z, u.z, -f.z, 0,  -s.dot(eyePos), -u.dot(eyePos), f.dot(eyePos), 1);
+        return Mat<T, 4, 4>(s.x, u.x, -f.x, 0, s.y, u.y, -f.y, 0, s.z, u.z, -f.z, 0, -s.dot(eyePos), -u.dot(eyePos),
+                            f.dot(eyePos), 1);
     }
 
     // Adapted from https://registry.khronos.org/OpenGL-Refpages/gl2.1/xhtml/gluPerspective.xml
@@ -565,7 +566,7 @@ struct Mat
     }
 
     template<int z>
-    Mat<T, z, y> operator* (Mat<T, z, x> m)
+    Mat<T, z, y> operator*(Mat<T, z, x> m)
     {
         Mat<T, z, y> result;
         for (int iy = 0; iy < y; iy++)
@@ -581,19 +582,35 @@ struct Mat
         return result;
     }
 
-    Vec4<T> operator* (Vec4<T> v)
+    Vec4<T> operator*(Vec4<T> v)
     {
         return Vec4<T>((*this) * Mat<T, 1, 4>(v));
     }
 
-    Vec3<T> operator* (Vec3<T> v)
+    Vec3<T> operator*(Vec3<T> v)
     {
         return Vec4<T>((*this) * Mat<T, 1, 3>(v));
     }
 
-    Vec2<T> operator* (Vec2<T> v)
+    Vec2<T> operator*(Vec2<T> v)
     {
         return Vec4<T>((*this) * Mat<T, 1, 2>(v));
+    }
+
+    void print()
+    {
+        printf("[");
+        for (int i = 0; i < x; i++)
+        {
+            for (int j = 0; j < y; j++)
+            {
+                printf("%f ", data[i][j]);
+            }
+
+            if (i == x - 1)
+                printf("]");
+            printf("\n");
+        }
     }
 };
 
