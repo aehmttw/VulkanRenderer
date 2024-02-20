@@ -388,15 +388,100 @@ public:
         }
     };
 
+    static const int step = 0;
+    static const int linear = 1;
+    static const int slerp = 2;
+
+    template<typename V>
+    struct Driver
+    {
+        std::string name;
+        std::vector<double> times;
+        std::vector<V> values;
+        int interpolation;
+
+        Driver(const std::string &name, const std::vector<double> &times, const std::vector<V> &values, const std::string& interpolation)
+        {
+            this->name = name;
+            this->times = times;
+            this->values = values;
+            if (interpolation == "STEP")
+                this->interpolation = step;
+            else if (interpolation == "LINEAR")
+                this->interpolation = linear;
+            else if (interpolation == "SLERP")
+                this->interpolation = slerp;
+        }
+
+        V get(float time)
+        {
+            float beforeTime = -1;
+            V* before = null;
+            float afterTime = -1;
+            V* after = null;
+
+            for (int i = 0; i < times.size(); i++)
+            {
+                if (times[i] <= time)
+                {
+                    before = &(values[i]);
+                    beforeTime = times[i];
+                }
+                else
+                {
+                    after = &(values[i]);
+                    afterTime = times[i];
+                    break;
+                }
+            }
+
+            if (after == null)
+                return *before;
+            else if (before == null)
+                return *after;
+
+            float frac = (time - beforeTime) / (afterTime - beforeTime);
+
+            if (interpolation == step)
+                return *before;
+            else if (interpolation == linear)
+                return *before * (1 - frac) + *after * frac;
+            else
+            {
+                // adapted from glm: https://github.com/g-truc/glm/blob/master/glm/ext/quaternion_common.inl
+                double cosTheta = before->dot(*after);
+                V after2 = *after;
+                if (cosTheta < 0)
+                {
+                    cosTheta = -cosTheta;
+                    after2 = after2 * -1.0;
+                }
+
+                if (cosTheta > 0.99999)
+                    return *before * (1 - frac) + after2 * frac;
+                else
+                {
+                    double angle = std::acos(cosTheta);
+                    return ((*before) * sin((1 - frac) * angle) + after2 * sin(frac * angle)) / sin(angle);
+                }
+            }
+        }
+    };
+
     struct Node
     {
         std::string name;
+
         mat4 transform;
         mat4 invTransform;
 
         vec3 translation;
         vec4 rotation;
         vec3 scale;
+
+        Driver<dvec3>* translationDriver = null;
+        Driver<dvec4>* rotationDriver = null;
+        Driver<dvec3>* scaleDriver = null;
 
         std::vector<Node*> children;
         Camera* camera = null;
@@ -411,19 +496,38 @@ public:
             this->rotation = rotation;
             this->scale = scale;
 
+            this->computeTransform();
             this->name = name;
-            this->calculateTransforms();
         }
 
-        void calculateTransforms()
+        void computeDriverTransforms(float time)
+        {
+            if (this->translationDriver == null && this->scaleDriver == null && this->rotationDriver == null)
+                return;
+
+            if (this->translationDriver != null)
+                this->translation = vec3(this->translationDriver->get(time).x, this->translationDriver->get(time).y, this->translationDriver->get(time).z);
+
+            if (this->rotationDriver != null)
+                this->rotation = vec4(this->rotationDriver->get(time).x, this->rotationDriver->get(time).y, this->rotationDriver->get(time).z, this->rotationDriver->get(time).w);
+
+            if (this->scaleDriver != null)
+                this->scale = vec3(this->scaleDriver->get(time).x, this->scaleDriver->get(time).y, this->scaleDriver->get(time).z);
+
+            this->computeTransform();
+        }
+
+        void computeTransform()
         {
             this->transform = mat4::translation(translation) * mat4::rotate(rotation) * mat4::scale(scale);
             this->invTransform = mat4::scale(vec3(1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z)) * mat4::rotate(vec4(rotation.xyz(), -rotation.w)) * mat4::translation(translation * -1.0f);
         }
 
-        void draw(VkCommandBuffer b, mat4 m, Camera* camera, bool enableCulling)
+        void draw(VkCommandBuffer b, mat4 m, Camera* camera, bool enableCulling, float time)
         {
             assert(this);
+
+            this->computeDriverTransforms(time);
 
             mat4 m2 = m * transform;
             if (mesh != null)
@@ -484,7 +588,7 @@ public:
 
             for (Node* n: children)
             {
-                n->draw(b, m2, camera, enableCulling);
+                n->draw(b, m2, camera, enableCulling, time);
             }
         }
 
@@ -504,12 +608,6 @@ public:
         }
     };
 
-    struct Driver
-    {
-        Node* node;
-
-    };
-
     struct Scene
     {
         std::string name;
@@ -518,6 +616,9 @@ public:
         std::map<int, Node*> nodes;
         std::map<int, Mesh*> meshes;
         std::map<int, Camera*> cameras;
+        std::map<int, Driver<dvec3>*> translationDrivers;
+        std::map<int, Driver<dvec4>*> rotationDrivers;
+        std::map<int, Driver<dvec3>*> scaleDrivers;
 
         // Cameras enumerated sequentially
         std::map<int, Camera*> camerasEnumerated;
@@ -538,19 +639,25 @@ public:
         ~Scene()
         {
             for (auto n: nodes)
-            {
                 delete n.second;
-            }
 
             for (auto n: meshes)
-            {
                 delete n.second;
-            }
 
             for (auto n: cameras)
-            {
                 delete n.second;
-            }
+
+            for (auto n: translationDrivers)
+                delete n.second;
+
+            for (auto n: rotationDrivers)
+                delete n.second;
+
+            for (auto n: scaleDrivers)
+                delete n.second;
+
+            delete detachedCamera;
+            delete debugCamera;
         }
     };
 
@@ -560,6 +667,11 @@ public:
         std::map<int, Node*> nodes;
         std::map<int, Mesh*> meshes;
         std::map<int, Camera*> cameras;
+
+        std::map<int, Driver<dvec3>*> translations;
+        std::map<int, Driver<dvec4>*> rotations;
+        std::map<int, Driver<dvec3>*> scales;
+
 
         int cameraCount = 1;
         std::map<int, Camera*> camerasEnumerated;
@@ -655,6 +767,48 @@ public:
                 mesh->initialize();
                 meshes.insert(std::pair(i, mesh));
             }
+            else if (type == "DRIVER")
+            {
+                std::string name = jstring::cast((*o)["name"])->value;
+                std::string channel = jstring::cast((*o)["channel"])->value;
+                jarray* times = jarray::cast((*o)["times"]);
+                jarray* values = jarray::cast((*o)["values"]);
+                std::string interpolation = jstring::cast((*o)["interpolation"])->value;
+
+                std::vector<double> timesF (times->elements.size());
+                for (int i = 0; i < times->elements.size(); i++)
+                {
+                    timesF[i] = (float) jnumber::cast((*times)[i])->value;
+                }
+
+                if (channel == "translation")
+                {
+                    std::vector<dvec3> valuesF (times->elements.size());
+                    for (int i = 0; i < times->elements.size(); i++)
+                    {
+                        valuesF[i] = dvec3((float) jnumber::cast((*values)[3 * i])->value, (float) jnumber::cast((*values)[3 * i + 1])->value, (float) jnumber::cast((*values)[3 * i + 2])->value);
+                    }
+                    translations.insert(std::pair(i, new Driver<dvec3>(name, timesF, valuesF, interpolation)));
+                }
+                else if (channel == "rotation")
+                {
+                    std::vector<dvec4> valuesF (times->elements.size());
+                    for (int i = 0; i < times->elements.size(); i++)
+                    {
+                        valuesF[i] = dvec4((float) jnumber::cast((*values)[4 * i])->value, (float) jnumber::cast((*values)[4 * i + 1])->value, (float) jnumber::cast((*values)[4 * i + 2])->value, (float) jnumber::cast((*values)[4 * i + 3])->value);
+                    }
+                    rotations.insert(std::pair(i, new Driver<dvec4>(name, timesF, valuesF, interpolation)));
+                }
+                else if (channel == "scale")
+                {
+                    std::vector<dvec3> valuesF (times->elements.size());
+                    for (int i = 0; i < times->elements.size(); i++)
+                    {
+                        valuesF[i] = dvec3((float) jnumber::cast((*values)[3 * i])->value, (float) jnumber::cast((*values)[3 * i + 1])->value, (float) jnumber::cast((*values)[3 * i + 2])->value);
+                    }
+                    scales.insert(std::pair(i, new Driver<dvec3>(name, timesF, valuesF, interpolation)));
+                }
+            }
 
             i++;
         }
@@ -700,6 +854,17 @@ public:
                 if (mesh != null)
                     nodes[i]->mesh = meshes.at((int) mesh->value);
             }
+            else if (type == "DRIVER")
+            {
+                int node = (int) jnumber::cast((*o)["node"])->value;
+                std::string channel = jstring::cast((*o)["channel"])->value;
+                if (channel == "translation")
+                    nodes[node]->translationDriver = translations[i];
+                else if (channel == "rotation")
+                    nodes[node]->rotationDriver = rotations[i];
+                else if (channel == "scale")
+                    nodes[node]->scaleDriver = scales[i];
+            }
 
             i++;
         }
@@ -712,6 +877,9 @@ public:
         scene->meshes = meshes;
         scene->currentCameraIndex = currentCamIndex;
         scene->cameraCount = cameraCount;
+        scene->translationDrivers = translations;
+        scene->rotationDrivers = rotations;
+        scene->scaleDrivers = scales;
 
         if (currentCam != null)
         {
@@ -808,6 +976,11 @@ private:
     Scene* scene = null;
 
     float frameTime = 0;
+
+    bool timeRecorded = false;
+    std::chrono::steady_clock::time_point lastRecordedTime;
+    float currentTime = 0;
+    float timeRate = 1.0;
 
     void initWindow()
     {
@@ -2075,6 +2248,19 @@ private:
 
     void recordCommandBuffer(VkCommandBuffer commandBuffer, u32 imageIndex)
     {
+        if (!timeRecorded)
+        {
+            lastRecordedTime = std::chrono::high_resolution_clock::now();
+            timeRecorded = true;
+            currentTime = 0.0f;
+        }
+        else
+        {
+            auto now = std::chrono::high_resolution_clock::now();
+            currentTime += timeRate * std::chrono::duration<float, std::chrono::seconds::period>(now - lastRecordedTime).count();
+            lastRecordedTime = now;
+        }
+
         VkCommandBufferBeginInfo beginInfo {};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -2150,11 +2336,9 @@ private:
 
             for (auto r: scene->roots)
             {
-                r->draw(commandBuffer, transform, scene->currentCamera, enableCulling);
+                r->draw(commandBuffer, transform, scene->currentCamera, enableCulling, currentTime);
             }
         }
-//        vertexBuffer->draw(commandBuffer);
-//        vertexBuffer2->draw(commandBuffer);
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -2290,6 +2474,24 @@ private:
             mouseLastGrabY = y;
 
             mouseGrabbed++;
+        }
+
+        if (keyDown(GLFW_KEY_N))
+            timeRate -= frameTime;
+
+        if (keyDown(GLFW_KEY_M))
+            timeRate += frameTime;
+
+        if (keyDown(GLFW_KEY_COMMA))
+            timeRate = 1;
+
+        if (keyDown(GLFW_KEY_SEMICOLON))
+            timeRate = 0;
+
+        if (keyDown(GLFW_KEY_PERIOD))
+        {
+            std::erase(keysPressed, GLFW_KEY_PERIOD);
+            currentTime = 0;
         }
 
         if (keyDown(GLFW_KEY_0))
@@ -2429,6 +2631,8 @@ private:
 
         if (logStats)
             printf("Drew %lu meshes in %lld (%lu culled)\n", meshesDrawn, (end - time).count(), meshesCulled);
+
+//        printf("%lu, %lld\n", meshesDrawn, (end - time).count());
     };
 
     void updateUniformBuffer(mat4 m, u32 currentImage)
