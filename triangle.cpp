@@ -32,6 +32,10 @@ const std::vector<const char*> deviceExtensions =
             VK_KHR_SWAPCHAIN_EXTENSION_NAME
         };
 
+const std::vector<const char*> deviceExtensionsHeadless =
+        {
+
+        };
 
 const bool enable_validation_layers =
     #ifdef NDEBUG
@@ -167,7 +171,9 @@ class Renderer
 public:
     void run()
     {
-        initWindow();
+        if (!headless)
+            initWindow();
+
         initVulkan();
         load();
         loop();
@@ -902,11 +908,119 @@ public:
 
     char* sceneName = null;
     bool enableCulling = true;
+    bool headless = false;
     int displayWidth = 1280;
     int displayHeight = 720;
     char* requestedCameraName = null;
     char* requestedPhysicalDeviceName = null;
     bool logStats = false;
+
+    int headlessIndex = 0;
+    long swapchainTime = 0;
+
+    struct HeadlessEvent
+    {
+        long time;
+        int type;
+
+        float animTime;
+        float animRate;
+        std::string text;
+
+        HeadlessEvent(long time)
+        {
+            this->time = time;
+            this->type = 0;
+        }
+
+        HeadlessEvent(long time, float t, float r)
+        {
+            this->time = time;
+            this->type = 1;
+        }
+
+        HeadlessEvent(long time, std::string text, bool save)
+        {
+            this->time = time;
+            this->type = 2;
+            this->text = text;
+
+            if (!save)
+                this->type = 3;
+        }
+    };
+
+    std::vector<HeadlessEvent> headlessEvents {};
+
+    void readHeadlessEvents(std::string file)
+    {
+        auto text = readFile(file);
+        std::string textStr (text.begin(), text.end());
+        int lineStart = 0;
+        int mode = 0;
+        long time;
+        int type = -1;
+        float animTime;
+        for (int i = 0; i < text.size(); i++)
+        {
+            if (mode == 0 && text[i] == ' ')
+            {
+                std::string s = textStr.substr(lineStart, i - lineStart);
+                time = std::stoi(s);
+                lineStart = i + 1;
+                mode = 1;
+            }
+            else if (mode == 1 && text[i] == ' ')
+            {
+                std::string s = textStr.substr(lineStart, i - lineStart);
+                if (s == "PLAY")
+                    type = 1;
+                else if (s == "SAVE")
+                    type = 2;
+                else
+                    type = 3;
+
+                lineStart = i + 1;
+
+                mode = 2;
+            }
+            else if (mode == 2 && type == 1 && text[i] == ' ')
+            {
+                std::string s = textStr.substr(lineStart, i - lineStart);
+                mode = 3;
+                animTime = std::stof(s);
+                lineStart = i + 1;
+            }
+
+            if (text[i] == '\n')
+            {
+                if (mode == 1)
+                {
+                    std::string s = textStr.substr(lineStart, i - lineStart);
+                    if (s == "AVAILABLE")
+                        headlessEvents.emplace_back(HeadlessEvent(time));
+                }
+                else if (mode == 2 && type == 3)
+                {
+                    std::string s = textStr.substr(lineStart, i - lineStart);
+                    headlessEvents.emplace_back(HeadlessEvent(time, std::string(s), false));
+                }
+                else if (mode == 2 && type == 2)
+                {
+                    std::string s = textStr.substr(lineStart, i - lineStart);
+                    headlessEvents.emplace_back(HeadlessEvent(time, std::string(s), true));
+                }
+                else if (mode == 3 && type == 1)
+                {
+                    std::string s = textStr.substr(lineStart, i - lineStart);
+                    headlessEvents.emplace_back(HeadlessEvent(time, animTime, std::stof(s)));
+                }
+
+                mode = 0;
+                lineStart = i + 1;
+            }
+        }
+    }
 
 private:
     GLFWwindow* window;
@@ -927,6 +1041,8 @@ private:
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
     std::vector<VkImageView> swapChainImageViews;
+
+    std::vector<VkDeviceMemory> swapChainImageMemory;
 
     VkImage depthImage;
     VkDeviceMemory depthImageMemory;
@@ -1079,7 +1195,10 @@ private:
     {
         createInstance();
         setupDebugMessenger();
-        createSurface();
+
+        if (!headless)
+            createSurface();
+
         pickPhysicalDevice();
         createLogicalDevice();
         createSwapChain();
@@ -1182,18 +1301,30 @@ private:
 
     std::vector<const char *> getRequiredExtensions()
     {
-        u32 glfwExtensionCount = 0;
-        const char** glfwExtensions;
-        glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-        std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
-
-        if (enable_validation_layers)
+        if (!headless)
         {
-            extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        }
+            u32 glfwExtensionCount = 0;
+            const char **glfwExtensions;
+            glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 
-        return extensions;
+            std::vector<const char *> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+
+            if (enable_validation_layers)
+            {
+                extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            }
+
+            return extensions;
+        }
+        else
+        {
+            std::vector<const char *> extensions;
+            if (enable_validation_layers)
+            {
+                extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            }
+            return extensions;
+        }
     }
 
     void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo)
@@ -1290,9 +1421,11 @@ private:
                 indices.graphicsFamily = i;
 
             VkBool32 presentSupport = false;
-            vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface, &presentSupport);
 
-            if (presentSupport)
+            if (!headless)
+                vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface, &presentSupport);
+
+            if (presentSupport || headless)
                 indices.presentFamily = i;
 
             if (indices.isComplete())
@@ -1312,7 +1445,11 @@ private:
         std::vector<VkExtensionProperties> availableExtensions(extensionCount);
         vkEnumerateDeviceExtensionProperties(d, null, &extensionCount, availableExtensions.data());
 
-        std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
+        auto de = deviceExtensions;
+        if (headless)
+            de = deviceExtensionsHeadless;
+
+        std::set<std::string> requiredExtensions(de.begin(), de.end());
 
         for (const auto & e: availableExtensions)
         {
@@ -1360,6 +1497,9 @@ private:
     {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(d, &props);
+
+        if (headless)
+            return true;
 
         if (requestedPhysicalDeviceName != null)
         {
@@ -1411,7 +1551,9 @@ private:
 
         std::vector<const char*> extensions;
 
-        extensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        if (!headless)
+            extensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
         // Fix for mac: https://stackoverflow.com/questions/66659907/vulkan-validation-warning-catch-22-about-vk-khr-portability-subset-on-moltenvk
         extensions.emplace_back("VK_KHR_portability_subset");
 
@@ -1442,8 +1584,48 @@ private:
         vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
     }
 
+    void createHeadlessSwapChainImages(int width, int height, int count)
+    {
+        VkDeviceSize imageSize = width * height * 4;
+
+        swapChainImageFormat = VK_FORMAT_R8G8B8A8_SRGB;
+        for (int i = 0; i < count; i++)
+        {
+            void *data;
+            createImage(width, height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        swapChainImages[i], swapChainImageMemory[i]);
+
+            createSwapChainImageViews(i);
+        }
+    }
+
+    void createSwapChainImageViews(int i)
+    {
+        swapChainImageViews[i] = createImageView(swapChainImages[i], VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+
+
+    void createSwapChainHeadless(VkExtent2D extent, int count)
+    {
+        swapChainImages.resize(count);
+        swapChainImageViews.resize(count);
+        swapChainImageMemory.resize(count);
+
+        swapChainExtent = extent;
+
+        createHeadlessSwapChainImages(extent.width, extent.height, count);
+    }
+
     void createSwapChain()
     {
+        if (headless)
+        {
+            createSwapChainHeadless({1000, 1000}, 3);
+            return;
+        }
+
         SwapChainSupportDetails s = querySwapChainSupport(physicalDevice);
         VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(s.formats);
         VkPresentModeKHR presentMode = chooseSwapPresentMode(s.presentModes);
@@ -1581,7 +1763,11 @@ private:
         colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        if (!headless)
+            colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        else
+            colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         VkAttachmentDescription depthAttachment{};
         depthAttachment.format = findDepthFormat();
@@ -1904,7 +2090,7 @@ private:
 
     void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
     {
-        VkImageCreateInfo imageInfo{};
+        VkImageCreateInfo imageInfo {};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
         imageInfo.extent.width = width;
@@ -2246,19 +2432,24 @@ private:
         }
     }
 
+    float lastHeadlessTime = 0;
     void recordCommandBuffer(VkCommandBuffer commandBuffer, u32 imageIndex)
     {
-        if (!timeRecorded)
+        if (!headless)
         {
-            lastRecordedTime = std::chrono::high_resolution_clock::now();
-            timeRecorded = true;
-            currentTime = 0.0f;
-        }
-        else
-        {
-            auto now = std::chrono::high_resolution_clock::now();
-            currentTime += timeRate * std::chrono::duration<float, std::chrono::seconds::period>(now - lastRecordedTime).count();
-            lastRecordedTime = now;
+            if (!timeRecorded)
+            {
+                lastRecordedTime = std::chrono::high_resolution_clock::now();
+                timeRecorded = true;
+                currentTime = 0.0f;
+            }
+            else
+            {
+                auto now = std::chrono::high_resolution_clock::now();
+                currentTime += timeRate * std::chrono::duration<float, std::chrono::seconds::period>(
+                        now - lastRecordedTime).count();
+                lastRecordedTime = now;
+            }
         }
 
         VkCommandBufferBeginInfo beginInfo {};
@@ -2383,11 +2574,16 @@ private:
 
     void loop()
     {
-        while (!glfwWindowShouldClose(window))
+        while (headless || !glfwWindowShouldClose(window))
         {
-            glfwPollEvents();
+            if (!headless)
+                glfwPollEvents();
+
             handleControls();
             drawFrame();
+
+            if (headless && headlessIndex >= headlessEvents.size())
+                break;
         }
 
         vkDeviceWaitIdle(device);
@@ -2395,6 +2591,9 @@ private:
 
     void handleControls()
     {
+        if (headless)
+            return;
+
         Camera* c = scene->currentCamera;
         if (scene->debugCameraMode)
             c = scene->debugCamera;
@@ -2559,21 +2758,54 @@ private:
         meshesDrawn = 0;
         meshesCulled = 0;
 
+        if (headless)
+        {
+            float t = (float) headlessEvents[headlessIndex].time / 1000000.0f;
+            currentTime += (t - lastHeadlessTime) * timeRate;
+            lastHeadlessTime = t;
+
+            if (headlessEvents[headlessIndex].type == 1)
+            {
+                currentTime = headlessEvents[headlessIndex].animTime;
+                timeRate = headlessEvents[headlessIndex].animRate;
+            }
+            else if (headlessEvents[headlessIndex].type == 3)
+            {
+                printf("MARK %s\n", headlessEvents[headlessIndex].text.c_str());
+            }
+
+            headlessIndex++;
+            if (headlessEvents[headlessIndex - 1].type != 0)
+            {
+                return;
+            }
+        }
+
         auto time = std::chrono::high_resolution_clock::now();
+
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         u32 imageIndex;
-        auto result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
 
-        if (result == VK_ERROR_OUT_OF_DATE_KHR)
+        if (!headless)
         {
-            recreateSwapChain();
-            return;
+            auto result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame],
+                                                VK_NULL_HANDLE, &imageIndex);
+
+            if (result == VK_ERROR_OUT_OF_DATE_KHR)
+            {
+                recreateSwapChain();
+                return;
+            }
+            else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+            {
+                printf("failed: %d\n", result);
+                throw std::runtime_error("acquiring next image failed!");
+            }
         }
-        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+        else
         {
-            printf("failed: %d\n", result);
-            throw std::runtime_error("acquiring next image failed!");
+            imageIndex = currentFrame;
         }
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
@@ -2584,10 +2816,14 @@ private:
         VkSubmitInfo submitInfo {};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
+        std::vector<VkSemaphore> waitSemaphores = {};
+
+        if (!headless)
+            waitSemaphores = { imageAvailableSemaphores[currentFrame] };
+
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-        submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = waitSemaphores;
+        submitInfo.waitSemaphoreCount = waitSemaphores.size();
+        submitInfo.pWaitSemaphores = waitSemaphores.data();
         submitInfo.pWaitDstStageMask = waitStages;
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
@@ -2596,6 +2832,9 @@ private:
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
+        if (headless)
+            submitInfo.signalSemaphoreCount = 0;
+
         auto result1 = vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]);
         if (result1 != VK_SUCCESS)
         {
@@ -2603,26 +2842,29 @@ private:
             throw std::runtime_error("submitting draw command buffer failed!");
         }
 
-        VkPresentInfoKHR presentInfo {};
-        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = signalSemaphores;
-
-        VkSwapchainKHR swapChains[] = { swapChain };
-        presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = swapChains;
-        presentInfo.pImageIndices = &imageIndex;
-
-        result = vkQueuePresentKHR(presentQueue, &presentInfo);
-        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized)
+        if (!headless)
         {
-            framebufferResized = false;
-            recreateSwapChain();
-        }
-        else if (result != VK_SUCCESS)
-        {
-            printf("failed: %d\n", result);
-            throw std::runtime_error("failed to present swap chain image!");
+            VkPresentInfoKHR presentInfo{};
+            presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            presentInfo.waitSemaphoreCount = 1;
+            presentInfo.pWaitSemaphores = signalSemaphores;
+
+            VkSwapchainKHR swapChains[] = {swapChain};
+            presentInfo.swapchainCount = 1;
+            presentInfo.pSwapchains = swapChains;
+            presentInfo.pImageIndices = &imageIndex;
+
+            auto result = vkQueuePresentKHR(presentQueue, &presentInfo);
+            if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized)
+            {
+                framebufferResized = false;
+                recreateSwapChain();
+            }
+            else if (result != VK_SUCCESS)
+            {
+                printf("failed: %d\n", result);
+                throw std::runtime_error("failed to present swap chain image!");
+            }
         }
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -2687,9 +2929,14 @@ private:
         if (enable_validation_layers)
             destroyDebugUtilsMessengerEXT(instance, debugMessenger, null);
 
-        vkDestroySurfaceKHR(instance, surface, null);
+        if (!headless)
+            vkDestroySurfaceKHR(instance, surface, null);
+
         vkDestroyInstance(instance, null);
-        glfwDestroyWindow(window);
+
+        if (!headless)
+            glfwDestroyWindow(window);
+
         glfwTerminate();
     }
 
@@ -2709,7 +2956,8 @@ private:
             vkDestroyImageView(device, imageView, null);
         }
 
-        vkDestroySwapchainKHR(device, swapChain, null);
+        if (!headless)
+            vkDestroySwapchainKHR(device, swapChain, null);
     }
 
     void recreateSwapChain()
@@ -2717,11 +2965,14 @@ private:
         int w = 0;
         int h = 0;
 
-        glfwGetFramebufferSize(window, &w, &h);
-        while (w == 0 && h == 0)
+        if (!headless)
         {
             glfwGetFramebufferSize(window, &w, &h);
-            glfwWaitEvents();
+            while (w == 0 && h == 0)
+            {
+                glfwGetFramebufferSize(window, &w, &h);
+                glfwWaitEvents();
+            }
         }
 
         vkDeviceWaitIdle(device);
@@ -2745,6 +2996,8 @@ int main(int argc, char** args)
     int height = 720;
     bool culling = true;
     bool stats = false;
+    bool headless = false;
+    std::string events;
 
     for (int i = 0; i < argc; i++)
     {
@@ -2776,6 +3029,13 @@ int main(int argc, char** args)
             }
         }
 
+        if (strncmp(args[i], "--headless", 10) == 0 && i + 1 < argc)
+        {
+            headless = true;
+            events = args[i + 1];
+        }
+
+
         if (strncmp(args[i], "--log-stats", 11) == 0)
             stats = true;
     }
@@ -2794,6 +3054,9 @@ int main(int argc, char** args)
     app.requestedCameraName = camera;
     app.requestedPhysicalDeviceName = physicalDevice;
     app.logStats = stats;
+    app.headless = headless;
+    if (app.headless)
+        app.readHeadlessEvents(events);
 
     try
     {
