@@ -123,7 +123,7 @@ static std::vector<char>* readFileWithCache(const std::string& filename)
     return buffer;
 }
 
-struct Vertex
+struct SimpleVertex
 {
     vec3 pos;
     vec3 normal;
@@ -133,7 +133,7 @@ struct Vertex
     {
         VkVertexInputBindingDescription desc {};
         desc.binding = 0;
-        desc.stride = sizeof(Vertex);
+        desc.stride = sizeof(SimpleVertex);
         desc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
         return desc;
     }
@@ -144,17 +144,65 @@ struct Vertex
         descs[0].binding = 0;
         descs[0].location = 0;
         descs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-        descs[0].offset = offsetof(Vertex, pos);
+        descs[0].offset = offsetof(SimpleVertex, pos);
 
         descs[1].binding = 0;
         descs[1].location = 1;
         descs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-        descs[1].offset = offsetof(Vertex, normal);
+        descs[1].offset = offsetof(SimpleVertex, normal);
 
         descs[2].binding = 0;
         descs[2].location = 2;
         descs[2].format = VK_FORMAT_R8G8B8A8_UNORM;
-        descs[2].offset = offsetof(Vertex, color);
+        descs[2].offset = offsetof(SimpleVertex, color);
+        return descs;
+    }
+};
+
+struct ComplexVertex
+{
+    vec3 pos;
+    vec3 normal;
+    vec4 tangent;
+    vec2 texCoord;
+    u8vec4 color;
+
+    static VkVertexInputBindingDescription getBindDesc()
+    {
+        VkVertexInputBindingDescription desc {};
+        desc.binding = 0;
+        desc.stride = sizeof(ComplexVertex);
+        desc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return desc;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 5> getAttributeDesc()
+    {
+        std::array<VkVertexInputAttributeDescription, 5> descs {};
+        descs[0].binding = 0;
+        descs[0].location = 0;
+        descs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        descs[0].offset = offsetof(ComplexVertex, pos);
+
+        descs[1].binding = 0;
+        descs[1].location = 1;
+        descs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        descs[1].offset = offsetof(ComplexVertex, normal);
+
+        descs[2].binding = 0;
+        descs[2].location = 2;
+        descs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        descs[2].offset = offsetof(ComplexVertex, tangent);
+
+        descs[3].binding = 0;
+        descs[3].location = 3;
+        descs[3].format = VK_FORMAT_R32G32_SFLOAT;
+        descs[3].offset = offsetof(ComplexVertex, texCoord);
+
+        descs[4].binding = 0;
+        descs[4].location = 4;
+        descs[4].format = VK_FORMAT_R8G8B8A8_UNORM;
+        descs[4].offset = offsetof(ComplexVertex, color);
         return descs;
     }
 };
@@ -252,10 +300,19 @@ public:
             VkBuffer stagingBuffer;
             VkDeviceMemory stagingBufferMemory;
 
-            VkDeviceSize size = sizeof(Vertex) * count;
+            VkDeviceSize size = sizeof(SimpleVertex) * count;
             renderer->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
             Attribute pos = attributes.at("POSITION");
+//            Attribute col = attributes.at("COLOR");
+//
+//            for (int i = 0; i < count; i++)
+//            {
+//                *(float*) &(((char*) (pos.data))[col.offset + col.stride * i + 0 * sizeof(float)]) *= 2;
+//                *(float*) &(((char*) (pos.data))[col.offset + col.stride * i + 1 * sizeof(float)]) *= 2;
+//                *(float*) &(((char*) (pos.data))[col.offset + col.stride * i + 2 * sizeof(float)]) *= 2;
+//            }
+
             void* data;
             vkMapMemory(renderer->device, stagingBufferMemory, 0, size, 0, &data);
             memcpy(data, pos.data, size);
@@ -474,6 +531,112 @@ public:
         }
     };
 
+    struct Texture
+    {
+        std::string src;
+        bool isCube;
+        bool exponential;
+
+        Texture(std::string src, std::string type, std::string format)
+        {
+            this->src = src;
+            this->isCube = type == "cube";
+            this->exponential = format == "rgbe";
+        }
+
+        Texture(jobject* o)
+        {
+            src = jstring::cast((*o)["src"])->value;
+            if ((*o)["type"] != null)
+                isCube = jstring::cast((*o)["type"])->value == "cube";
+            if ((*o)["format"] != null)
+                isCube = jstring::cast((*o)["format"])->value == "rgbe";
+        }
+    };
+
+    struct Environment
+    {
+        std::string name;
+        Texture* texture;
+
+        Environment(std::string name, Texture* tex)
+        {
+            this->name = name;
+            this->texture = tex;
+        }
+    };
+
+    struct Material
+    {
+        std::string name;
+        Texture* normalMap = null;
+        Texture* displacementMap = null;
+
+        int type;
+    };
+
+    struct MaterialSimple : Material
+    {
+        const static int material_type = 0;
+
+        MaterialSimple()
+        {
+            this->type = MaterialSimple::material_type;
+        }
+    };
+
+    struct MaterialPBR : Material
+    {
+        const static int material_type = 1;
+
+        Texture* albedoTex = null;
+        vec3 albedoVec = vec3(1, 1, 1);
+
+        Texture* roughnessTex = null;
+        float roughnessVal = 1.0;
+
+        Texture* metalnessTex = null;
+        float metalnessVal = 0.0;
+
+        MaterialPBR()
+        {
+            this->type = MaterialPBR::material_type;
+        }
+    };
+
+    struct MaterialLambertian : Material
+    {
+        const static int material_type = 2;
+
+        Texture* albedoTex = null;
+        vec3 albedoVec = vec3(1, 1, 1);
+
+        MaterialLambertian()
+        {
+            this->type = MaterialLambertian::material_type;
+        }
+    };
+
+    struct MaterialMirror : Material
+    {
+        const static int material_type = 3;
+
+        MaterialMirror()
+        {
+            this->type = MaterialMirror::material_type;
+        }
+    };
+
+    struct MaterialEnvironment : Material
+    {
+        const static int material_type = 4;
+
+        MaterialEnvironment()
+        {
+            this->type = MaterialEnvironment::material_type;
+        }
+    };
+
     struct Node
     {
         std::string name;
@@ -678,6 +841,9 @@ public:
         std::map<int, Driver<dvec4>*> rotations;
         std::map<int, Driver<dvec3>*> scales;
 
+        std::map<int, Environment*> environments;
+        std::map<int, Material*> materials;
+
 
         int cameraCount = 1;
         std::map<int, Camera*> camerasEnumerated;
@@ -815,6 +981,78 @@ public:
                     scales.insert(std::pair(i, new Driver<dvec3>(name, timesF, valuesF, interpolation)));
                 }
             }
+            else if (type == "MATERIAL")
+            {
+                std::string name = jstring::cast((*o)["name"])->value;
+                jobject* normalMap = jobject::cast((*o)["normalMap"]);
+                Texture* normalTex = null;
+                if (o != null)
+                    normalTex = new Texture(normalMap);
+
+                Material* material;
+
+                if ((*o)["pbr"] != null)
+                {
+                    auto m = new MaterialPBR();
+                    jobject* pbr = jobject::cast((*o)["pbr"]);
+
+                    jvalue* albedo = (*pbr)["albedo"];
+                    if (albedo->type == type_array)
+                    {
+                        jarray* a = jarray::cast(albedo);
+                        m->albedoVec = vec3((float) jnumber::cast((*a)[0])->value, (float) jnumber::cast((*a)[1])->value, (float) jnumber::cast((*a)[2])->value);
+                    }
+                    else
+                        m->albedoTex = new Texture(jobject::cast(albedo));
+
+                    jvalue* roughness = (*pbr)["roughness"];
+                    if (roughness->type == type_number)
+                        m->roughnessVal = (float) jnumber::cast(roughness)->value;
+                    else
+                        m->roughnessTex = new Texture(jobject::cast(roughness));
+
+
+                    jvalue* metalness = (*pbr)["metalness"];
+                    if (metalness->type == type_number)
+                        m->metalnessVal = (float) jnumber::cast(metalness)->value;
+                    else
+                        m->metalnessTex = new Texture(jobject::cast(metalness));
+
+                    material = m;
+                }
+                else if ((*o)["lambertian"] != null)
+                {
+                    auto m = new MaterialLambertian();
+                    jobject* lamb = jobject::cast((*o)["lambertian"]);
+
+                    jvalue* albedo = (*lamb)["albedo"];
+                    if (albedo->type == type_array)
+                    {
+                        jarray* a = jarray::cast(albedo);
+                        m->albedoVec = vec3((float) jnumber::cast((*a)[0])->value, (float) jnumber::cast((*a)[1])->value, (float) jnumber::cast((*a)[2])->value);
+                    }
+                    else
+                        m->albedoTex = new Texture(jobject::cast(albedo));
+
+                    material = m;
+                }
+                else if ((*o)["mirror"] != null)
+                    material = new MaterialMirror();
+                else if ((*o)["environment"] != null)
+                    material = new MaterialEnvironment();
+                else
+                    material = new MaterialSimple();
+
+                material->name = name;
+                material->normalMap = normalTex;
+                materials.insert(std::pair(i, material));
+            }
+            else if (type == "ENVIRONMENT")
+            {
+                std::string name = jstring::cast((*o)["name"])->value;
+                jobject* ob = jobject::cast((*o)["radiance"]);
+                environments.insert(std::pair(i, new Environment(name, new Texture(ob))));
+            }
 
             i++;
         }
@@ -914,6 +1152,7 @@ public:
     char* requestedCameraName = null;
     char* requestedPhysicalDeviceName = null;
     bool logStats = false;
+    bool hdr = false;
 
     int headlessIndex = 0;
     long swapchainTime = 0;
@@ -1310,9 +1549,10 @@ private:
             std::vector<const char *> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
 
             if (enable_validation_layers)
-            {
                 extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-            }
+
+            if (hdr)
+                extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
 
             return extensions;
         }
@@ -1686,10 +1926,11 @@ private:
     {
         for (const auto & f: availableFormats)
         {
-            if (f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-            {
+            if (hdr && f.format == VK_FORMAT_R16G16B16A16_SFLOAT && f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT)
                 return f;
-            }
+
+            if (!hdr && f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+                return f;
         }
 
         return availableFormats[0];
@@ -1846,7 +2087,7 @@ private:
     void createGraphicsPipeline()
     {
         auto vertShaderCode = readFile("spv/shader.vert.spv");
-        auto fragShaderCode = readFile("spv/shader.frag.spv");
+        auto fragShaderCode = hdr ? readFile("spv/shader_hdr.frag.spv") : readFile("spv/shader.frag.spv");
 
         VkShaderModule vertSM = createShaderModule(vertShaderCode);
         VkShaderModule fragSM = createShaderModule(fragShaderCode);
@@ -1865,8 +2106,8 @@ private:
 
         VkPipelineShaderStageCreateInfo shaderStages[] = { vertSSI, fragSSI };
 
-        auto bindDesc = Vertex::getBindDesc();
-        auto attribDesc = Vertex::getAttributeDesc();
+        auto bindDesc = SimpleVertex::getBindDesc();
+        auto attribDesc = SimpleVertex::getAttributeDesc();
 
         VkPipelineVertexInputStateCreateInfo vertII {};
         vertII.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

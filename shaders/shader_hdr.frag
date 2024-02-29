@@ -11,6 +11,7 @@ void main()
     outColor = fragColor * (dot(fragNormal, vec3(0.0, 0.0, 1.0)) / 2.0 + 0.5);
     outColor.a = fragColor.a;
 
-    outColor = vec4(2.0 * outColor.rgb / (outColor.rgb + vec3(1, 1, 1)), outColor.a);
-    outColor.rgb = vec3(min(outColor.r, 1.0), min(outColor.g, 1.0), min(outColor.b, 1.0));
+    //inspired by https://learnopengl.com/Advanced-Lighting/Gamma-Correction
+    vec3 corrected_color = pow(outColor.rgb, vec3(1.0 / 2.2));
+    outColor = vec4(corrected_color / (corrected_color + vec3(1, 1, 1)), outColor.a);
 }
