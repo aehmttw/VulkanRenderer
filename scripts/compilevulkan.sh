@@ -4,5 +4,5 @@ export LIBRARY_PATH=~/VulkanSDK/1.3.268.1/macOS/lib:/opt/homebrew/lib:$LIBRARY_P
 ./compileshaders.sh
 cd ../../runtime
 echo "Compiling..."
-g++ -std=c++20 -O3 ../code/renderer.cpp ../code/vecmath.hpp ../code/json.hpp -lglfw -lvulkan
+g++ -std=c++20 -O3 -Wno-deprecated-declarations ../code/renderer.cpp ../code/vecmath.hpp ../code/json.hpp -lglfw -lvulkan
 echo "Done!"

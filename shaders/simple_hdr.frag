@@ -5,10 +5,17 @@ layout(location = 1) in vec3 fragNormal;
 
 layout(location = 0) out vec4 outColor;
 
+layout( push_constant ) uniform UniformBufferObject
+{
+    mat4 model;
+    mat4 proj;
+} ubo;
 
 void main()
 {
-    outColor = fragColor * (dot(fragNormal, vec3(0.0, 0.0, 1.0)) / 2.0 + 0.5);
+    vec3 normal = (ubo.model * vec4(fragNormal, 1)).xyz;
+
+    outColor = fragColor * (dot(normal, vec3(0.0, 0.0, 1.0)) / 2.0 + 0.5);
     outColor.a = fragColor.a;
 
     //inspired by https://learnopengl.com/Advanced-Lighting/Gamma-Correction
