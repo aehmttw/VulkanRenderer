@@ -571,7 +571,7 @@ public:
         Renderer* renderer;
 
         bool isCube = false;
-        bool exponential;
+        bool exponential = false;
         std::vector<unsigned char*> data;
         std::vector<float*> dataFloat;
         int width;
@@ -607,11 +607,11 @@ public:
             initTexture();
         }
 
-        Texture(Renderer* r, jobject* o, int mipmapCount = 1)
+        Texture(Renderer* r, jobject* o, int mipmapCount = 1, std::string suffix = "")
         {
             assert(o);
             this->renderer = r;
-            std::string src = jstring::cast((*o)["src"])->value;
+            std::string src = jstring::cast((*o)["src"])->value + suffix;
             if ((*o)["type"] != null)
                 isCube = jstring::cast((*o)["type"])->value == "cube";
             if ((*o)["format"] != null)
@@ -619,13 +619,16 @@ public:
 
             data.emplace_back(stbi_load(src.c_str(), &width, &height, &channels, STBI_rgb_alpha));
             if (!data[0])
+            {
+                printf("source: %s\n", src.c_str());
                 throw std::runtime_error("failed to create image!");
+            }
 
             for (int i = 0; i < mipmapCount - 1; i++)
             {
                 int w;
                 int h;
-                data.emplace_back(stbi_load((src + "." + std::to_string(i)).c_str(), &w, &h, &channels, STBI_rgb_alpha));
+                data.emplace_back(stbi_load((src + "." + std::to_string(i) + ".png").c_str(), &w, &h, &channels, STBI_rgb_alpha));
                 if (!data[i + 1])
                     throw std::runtime_error("failed to create image mipmap!");
             }
@@ -769,18 +772,21 @@ public:
     struct Environment
     {
         std::string name;
-        Texture* texture;
+        Texture* texturePBR;
+        Texture* textureLambertian;
         mat4 worldToEnvironmentTransform = mat4::I();
 
-        Environment(std::string name, Texture* tex)
+        Environment(std::string name, Texture* texPBR, Texture* texLam)
         {
             this->name = name;
-            this->texture = tex;
+            this->texturePBR = texPBR;
+            this->textureLambertian = texLam;
         }
 
         ~Environment()
         {
-            delete texture;
+            delete texturePBR;
+            delete textureLambertian;
         }
     };
 
@@ -797,6 +803,7 @@ public:
         VkDescriptorSetLayout descriptorSetLayout;
 
         int textures;
+        int instances = 0;
 
         MaterialType(int textures)
         {
@@ -810,20 +817,24 @@ public:
 
             std::vector<VkDescriptorPoolSize> poolSizes (1);
 
+            int i = 1;
+            if (instances > 0)
+                i = instances;
+
             poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
+            poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * i);
 
             if (textures > 0)
             {
                 poolSizes.resize(2);
                 poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * textures);
+                poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * textures * i);
             }
 
             poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
             poolInfo.pPoolSizes = poolSizes.data();
             poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            poolInfo.maxSets = static_cast<uint32_t>(max_frames_in_flight);
+            poolInfo.maxSets = static_cast<uint32_t>(max_frames_in_flight * i);
 
             auto result = vkCreateDescriptorPool(device, &poolInfo, null, &descriptorPool);
             if (result != VK_SUCCESS)
@@ -1541,16 +1552,16 @@ public:
                 else
                     material = new MaterialSimple();
 
+                material->type->instances++;
                 material->name = name;
                 material->normalMap = normalTex;
                 materials.insert(std::pair(i, material));
-                material->createDescriptorSets(device);
             }
             else if (type == "ENVIRONMENT")
             {
                 std::string name = jstring::cast((*o)["name"])->value;
                 jobject* ob = jobject::cast((*o)["radiance"]);
-                env = new Environment(name, new Texture(this, ob, 5));
+                env = new Environment(name, new Texture(this, ob, 5), new Texture(this, ob, 1, ".l.png"));
                 environments.insert(std::pair(i, env));
             }
 
@@ -1645,7 +1656,8 @@ public:
         scene->environments = environments;
         scene->materials = materials;
 
-        scene->defaultEnvironment = new Environment("default", new Texture(this, vec3(1, 1, 1), true));
+        scene->defaultEnvironment = new Environment("default", new Texture(this, vec3(1, 1, 1), true), new Texture(this, vec3(1, 1, 1), true));
+
 
         if (env != null)
             scene->environment = env;
@@ -1974,12 +1986,6 @@ private:
         createDepthResources();
         createFramebuffers();
         createUniformBuffers();
-
-        for (MaterialType* t: materialTypes)
-        {
-            t->createDescriptorPool(device);
-        }
-
         createDescriptorPool();
         createCommandBuffers();
         createSyncObjects();
@@ -2801,10 +2807,10 @@ private:
         matrices.size = sizeof(PushConstant);
         matrices.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         createGraphicsPipeline<SimpleVertex>(materialTypeSimple, "spv/simple.vert.spv",  "spv/simple.frag.spv", {matrices});
-        //createGraphicsPipeline<ComplexVertex>(materialTypeEnvironment, "spv/complex.vert.spv", hdr ? "spv/complex_hdr.frag.spv" : "spv/complex.frag.spv", {matrices});
-        //createGraphicsPipeline<ComplexVertex>(materialTypeMirror, "spv/complex.vert.spv", hdr ? "spv/complex_hdr.frag.spv" : "spv/complex.frag.spv", {matrices});
-        //createGraphicsPipeline<ComplexVertex>(materialTypeLambertian, "spv/complex.vert.spv", hdr ? "spv/complex_hdr.frag.spv" : "spv/complex.frag.spv", {matrices});
-        createGraphicsPipeline<ComplexVertex>(materialTypePBR, "spv/complex.vert.spv", "spv/complex.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypeEnvironment, "spv/complex.vert.spv", "spv/environment.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypeMirror, "spv/complex.vert.spv", "spv/mirror.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypeLambertian, "spv/complex.vert.spv", "spv/lambertian.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypePBR, "spv/complex.vert.spv", "spv/pbr.frag.spv", {matrices});
     }
 
     void destroyGraphicsPipelines()
@@ -3165,7 +3171,7 @@ private:
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
+        poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 2);
 
         VkDescriptorPoolCreateInfo poolInfo {};
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
@@ -3194,7 +3200,7 @@ private:
 
         VkDescriptorSetLayoutBinding samplerLayoutBinding {};
         samplerLayoutBinding.binding = 1;
-        samplerLayoutBinding.descriptorCount = 1;
+        samplerLayoutBinding.descriptorCount = 2;
         samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBinding.pImmutableSamplers = null;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -3237,10 +3243,15 @@ private:
             bufferInfo.offset = 0;
             bufferInfo.range = sizeof(UniformBufferObject);
 
-            VkDescriptorImageInfo envInfo {};
-            envInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            envInfo.imageView = scene->environment->texture->imageView;
-            envInfo.sampler = scene->environment->texture->sampler;
+            VkDescriptorImageInfo envInfoPBR {};
+            envInfoPBR.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            envInfoPBR.imageView = scene->environment->texturePBR->imageView;
+            envInfoPBR.sampler = scene->environment->texturePBR->sampler;
+
+            VkDescriptorImageInfo envInfoLambertian {};
+            envInfoLambertian.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            envInfoLambertian.imageView = scene->environment->textureLambertian->imageView;
+            envInfoLambertian.sampler = scene->environment->textureLambertian->sampler;
 
             std::array<VkWriteDescriptorSet, 2> descriptorWrites {};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3251,13 +3262,13 @@ private:
             descriptorWrites[0].descriptorCount = 1;
             descriptorWrites[0].pBufferInfo = &bufferInfo;
 
-            std::array<VkDescriptorImageInfo, 1> imageInfos {envInfo};
+            std::array<VkDescriptorImageInfo, 2> imageInfos {envInfoPBR, envInfoLambertian};
             descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[1].dstSet = globalDescriptorSets[i];
             descriptorWrites[1].dstBinding = 1;
             descriptorWrites[1].dstArrayElement = 0;
             descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].descriptorCount = imageInfos.size();
             descriptorWrites[1].pImageInfo = imageInfos.data();
 
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, null);
@@ -3419,11 +3430,24 @@ private:
 
     void load()
     {
-        defaultMaterial.createDescriptorSets(device);
-
         std::string s = std::string(readFileWithCache(this->sceneName)->data());
         jarray* o = jparse_array(s);
         this->scene = parseScene(o);
+
+        // Add default material
+        materialTypeSimple.instances++;
+
+        for (MaterialType* t: materialTypes)
+        {
+            t->createDescriptorPool(device);
+        }
+
+        for (auto m: scene->materials)
+        {
+            m.second->createDescriptorSets(device);
+        }
+
+        defaultMaterial.createDescriptorSets(device);
 
         createDescriptorSets();
     }

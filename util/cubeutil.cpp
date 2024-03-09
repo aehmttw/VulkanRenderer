@@ -118,12 +118,12 @@ struct Tex
                 return;
             }
 
-            int lmax = (int) log2(max);
+            int lmax = (int) ceil(log2(max));
 
-            float p = pow(2, lmax);
+            float p = (float) pow(2, lmax);
             //printf("%f %f %f %d\n", l.x, l.y, l.z, lmax);
-            u8vec4 colOut = u8vec4((unsigned char) (l.x * 256 / p), (unsigned char) (l.y * 256 / p),
-                                   (unsigned char) (l.z * 256 / p), lmax + 128);
+            u8vec4 colOut = u8vec4((unsigned char) (fmin(255, floor(l.x * 256 / p))), (unsigned char) (fmin(255, floor(l.y * 256 / p))),
+                                   (unsigned char) (fmin(255, floor(l.z * 256 / p))), (unsigned char) (lmax + 128));
             data[index * 4] = colOut.x;
             data[index * 4 + 1] = colOut.y;
             data[index * 4 + 2] = colOut.z;
@@ -131,9 +131,9 @@ struct Tex
         }
         else
         {
-            data[index * 4] = (unsigned char)(l.x * 255);
-            data[index * 4 + 1] = (unsigned char)(l.y * 255);
-            data[index * 4 + 2] = (unsigned char)(l.z * 255);
+            data[index * 4] = (unsigned char)(fmin(255, l.x * 255));
+            data[index * 4 + 1] = (unsigned char)(fmin(255,l.y * 255));
+            data[index * 4 + 2] = (unsigned char)(fmin(255,l.z * 255));
             data[index * 4 + 3] = 255;
         }
     }
@@ -183,15 +183,18 @@ float getReflectance(vec3 in, vec3 out, float roughness)
 {
     float dot = in.dot(out);
 
-    if (dot < 0)
-        return 0;
+//    if (dot < 0)
+//        return 0;
 
     float r2 = roughness * roughness;
 
     if (roughness <= 0)
         return in.x == out.x && in.y == out.y && in.z == out.z;
 
-    float v = dot * dot * (r2 - 1.0f) + 1.0f;
+    float v = abs(dot) * dot * (r2 - 1.0f) + 1.0f;
+    if (v < 0)
+        v = 0;
+
     v = v * v * M_PI;
 
     if (v > 0)
@@ -205,8 +208,8 @@ vec3 getLight(Tex* t, CubeSample c, float roughness, bool lam)
     if (roughness <= 0)
         return t->sample(c);
 
-    float totalPower = 0;
-    vec3 totalColor = vec3(0, 0, 0);
+    double totalPower = 0;
+    dvec3 totalColor = dvec3(0, 0, 0);
     vec3 cn = c.toVec3().normalize();
     for (int face = 0; face < 6; face++)
     {
@@ -223,14 +226,16 @@ vec3 getLight(Tex* t, CubeSample c, float roughness, bool lam)
                 if (lam)
                     power = getReflectanceLambertian(in3 / len, cn) / len;
                 else
-                    power = getReflectance(in3 / len, cn, roughness) / len;
+                    power = getReflectance(in3 / len, cn, roughness * roughness) / len;
                 totalPower += power;
-                totalColor = totalColor + t->sample(in) * power;
+                vec3 s = t->sample(in);
+                totalColor = totalColor + dvec3(s.x, s.y, s.z) * power;
             }
         }
     }
 
-    return totalColor / totalPower;
+    dvec3 total = totalColor / totalPower;
+    return vec3(total.x, total.y, total.z);
 }
 
 void process(std::string in, std::string out, bool expMode, bool lambertian)
@@ -240,11 +245,17 @@ void process(std::string in, std::string out, bool expMode, bool lambertian)
 
     int count = lambertian ? 1 : 5;
 
+//    t = t->downscale();
     for (int m = 0; m < count; m++)
     {
         t = t->downscale();
+        if (lambertian)
+        {
+            t = t->downscale();
+            t = t->downscale();
+        }
 
-        Tex* result = new Tex(t->res, expMode);
+        Tex* result = new Tex(t->res, true);
         for (int face = 0; face < 6; face++)
         {
             for (int i = 0; i < t->res; i++)
@@ -255,7 +266,7 @@ void process(std::string in, std::string out, bool expMode, bool lambertian)
                     int index = faceOffset + i * t->res + j;
 
                     vec2 pos = vec2((i + 0.5) / t->res, (j + 0.5) / t->res);
-                    vec3 l = getLight(t, {face, pos}, pow((m + 1.0) / count, 2.0f), lambertian);
+                    vec3 l = getLight(t, {face, pos}, pow((m + 1.0) / count, 1.0f), lambertian);
 
                     result->writePixel(index, l);
                 }
@@ -264,14 +275,15 @@ void process(std::string in, std::string out, bool expMode, bool lambertian)
         }
 
         if (lambertian)
-            stbi_write_png((out).c_str(), t->res, t->res * 6, 4, result->data, t->res * 4);
+            stbi_write_png((out + ".l.png").c_str(), t->res, t->res * 6, 4, result->data, t->res * 4);
         else
-            stbi_write_png((out + "." + std::to_string(m) ).c_str(), t->res, t->res * 6, 4, result->data, t->res * 4);
+            stbi_write_png((out + "." + std::to_string(m) + ".png" ).c_str(), t->res, t->res * 6, 4, result->data, t->res * 4);
     }
 }
 
 int main(int argc, char** argv)
 {
     process(argv[1], argv[2], true, false);
+    process(argv[1], argv[2], true, true);
 }
 

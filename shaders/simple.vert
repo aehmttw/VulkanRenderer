@@ -11,6 +11,7 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
 {
     mat4 proj;
     mat4 camera;
+    mat4 env;
     vec4 cameraPos;
     bool hdr;
 } ubo;
