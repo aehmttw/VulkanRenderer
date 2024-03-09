@@ -5,20 +5,30 @@ layout(location = 1) in vec3 fragNormal;
 
 layout(location = 0) out vec4 outColor;
 
-layout( push_constant ) uniform UniformBufferObject
+layout(set = 0, binding = 0) uniform UniformBufferObject
 {
-    mat4 model;
     mat4 proj;
+    mat4 camera;
+    vec4 cameraPos;
+    bool hdr;
 } ubo;
 
 void main()
 {
-    mat3 model3 = mat3(ubo.model[0].xyz, ubo.model[1].xyz, ubo.model[2].xyz);
-    vec3 normal = normalize((model3 * fragNormal));
+    vec3 normal = fragNormal;
 
     outColor = fragColor * (dot(normal, vec3(0.0, 0.0, 1.0)) / 2.0 + 0.5);
     outColor.a = fragColor.a;
 
-    outColor = vec4(2.0 * outColor.rgb / (outColor.rgb + vec3(1, 1, 1)), outColor.a);
-    outColor.rgb = vec3(min(outColor.r, 1.0), min(outColor.g, 1.0), min(outColor.b, 1.0));
+    if (!ubo.hdr)
+    {
+        outColor = vec4(2.0 * outColor.rgb / (outColor.rgb + vec3(1, 1, 1)), outColor.a);
+        outColor.rgb = vec3(min(outColor.r, 1.0), min(outColor.g, 1.0), min(outColor.b, 1.0));
+    }
+    else
+    {
+        //inspired by https://learnopengl.com/Advanced-Lighting/Gamma-Correction
+        vec3 corrected_color = pow(outColor.rgb, vec3(1.0 / 2.2));
+        outColor = vec4(corrected_color / (corrected_color + vec3(1, 1, 1)), outColor.a);
+    }
 }

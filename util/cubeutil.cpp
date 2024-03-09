@@ -57,9 +57,7 @@ struct Tex
         int w;
         int h;
         int comp;
-        printf("%s\n", src.c_str());
         data = stbi_load(src.c_str(), &w, &h, &comp, STBI_rgb_alpha);
-        printf("%d %d\n", h, w);
         assert (h == 6 * w);
         res = w;
     }
@@ -239,13 +237,14 @@ void process(std::string in, std::string out, bool expMode, bool lambertian)
 {
     Tex *t = new Tex(in);
     t->exponent = expMode;
-    //std::ofstream outStream(out, std::ios::binary);
 
-    int count = lambertian ? 0 : 10;
+    int count = lambertian ? 1 : 5;
 
     for (int m = 0; m < count; m++)
     {
-        Tex* result = new Tex(t->res, false);
+        t = t->downscale();
+
+        Tex* result = new Tex(t->res, expMode);
         for (int face = 0; face < 6; face++)
         {
             for (int i = 0; i < t->res; i++)
@@ -264,10 +263,10 @@ void process(std::string in, std::string out, bool expMode, bool lambertian)
             }
         }
 
-        stbi_write_png((out + "_" + std::to_string(m) + ".png").c_str(), t->res, t->res * 6, 4, result->data, t->res * 4);
-
-        if (m % 2 == 0)
-            t = t->downscale();
+        if (lambertian)
+            stbi_write_png((out).c_str(), t->res, t->res * 6, 4, result->data, t->res * 4);
+        else
+            stbi_write_png((out + "." + std::to_string(m) ).c_str(), t->res, t->res * 6, 4, result->data, t->res * 4);
     }
 }
 
