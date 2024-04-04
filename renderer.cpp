@@ -234,8 +234,7 @@ public:
         if (!headless)
             initWindow();
 
-        initVulkan();
-        load();
+        initialize();
         loop();
         cleanup();
     }
@@ -276,7 +275,6 @@ public:
 
         std::string name;
         size_t count;
-        size_t stride = sizeof(SimpleVertex);
         VkPrimitiveTopology topology;
         std::map<std::string, Attribute> attributes;
         Material* material;
@@ -323,7 +321,7 @@ public:
             VkBuffer stagingBuffer;
             VkDeviceMemory stagingBufferMemory;
 
-            VkDeviceSize size = this->stride * count;
+            VkDeviceSize size = this->material->type->stride * count;
             renderer->createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
             Attribute pos = attributes.at("POSITION");
@@ -399,18 +397,19 @@ public:
 
         void draw(VkCommandBuffer commandBuffer, mat4 m)
         {
+            GraphicsPipeline* pipeline = this->material->type->getPipeline(renderer->scene);
             if (renderer->currentMaterialType != this->material->type)
             {
                 renderer->currentMaterialType = this->material->type;
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->material->type->pipeline.pipeline);
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
             }
 
             VkBuffer vertexBuffers[] = { buffer };
             VkDeviceSize offsets[] = { 0 };
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->material->type->pipeline.layout,
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
                                     0, 1, &(renderer->globalDescriptorSets[renderer->currentFrame]), 0, null);
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this->material->type->pipeline.layout,
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout,
                                     1, 1, &(material->descriptorSets[renderer->currentFrame]), 0, null);
 
             renderer->updatePushConstants(m, renderer->currentFrame);
@@ -790,6 +789,7 @@ public:
         }
     };
 
+    struct Scene;
     struct MaterialType;
 
     static std::vector<MaterialType*> materialTypes;
@@ -797,6 +797,16 @@ public:
     struct MaterialType
     {
         GraphicsPipeline pipeline;
+        GraphicsPipeline shadowMapPipeline;
+
+        GraphicsPipeline* getPipeline(Scene* scene)
+        {
+            if (scene->drawingShadow)
+                return &pipeline;
+            else
+                return &shadowMapPipeline;
+        }
+
         u32 stride;
 
         VkDescriptorPool descriptorPool;
@@ -1130,6 +1140,16 @@ public:
         int shadowIndex;
     };
 
+    struct ShadowMap
+    {
+        std::vector<VkFramebuffer> framebuffers {max_frames_in_flight};
+        std::vector<VkImage> images {max_frames_in_flight};
+        std::vector<VkDeviceMemory> imageMemories {max_frames_in_flight};
+        std::vector<VkImageView> imageViews {max_frames_in_flight};
+        std::vector<VkSampler> samplers {max_frames_in_flight};
+        ShaderLight* light;
+    };
+
     struct SunLight : Light
     {
         float angle;
@@ -1369,7 +1389,10 @@ public:
         std::map<int, Light*> lights;
 
         std::vector<ShaderLight> shaderLights {};
+        std::vector<ShadowMap> shadowMaps {};
         int shadowCount = 0;
+
+        bool drawingShadow = false;
 
         Environment* defaultEnvironment;
         Environment* environment;
@@ -1781,18 +1804,10 @@ public:
             {
                 jnumber* material = jnumber::cast((*o)["material"]);
                 if (material != null)
-                {
                     meshes[i]->material = materials.at((int) material->value);
-                    meshes[i]->stride = meshes[i]->material->type->stride;
-                }
             }
 
             i++;
-        }
-
-        for (auto m: meshes)
-        {
-            m.second->initialize();
         }
 
         camerasEnumerated[0] = scene->detachedCamera;
@@ -1832,6 +1847,14 @@ public:
         }
 
         return scene;
+    }
+
+    void initMeshes()
+    {
+        for (auto m: scene->meshes)
+        {
+            m.second->initialize();
+        }
     }
 
     char* sceneName = null;
@@ -1978,6 +2001,7 @@ private:
     VkImageView depthImageView;
 
     VkRenderPass renderPass;
+    VkRenderPass shadowRenderPass;
 
     std::vector<VkFramebuffer> swapChainFramebuffers;
 
@@ -2117,7 +2141,7 @@ private:
         return (std::find(keysPressed.begin(), keysPressed.end(), key) != keysPressed.end());
     }
 
-    void initVulkan()
+    void initialize()
     {
         createInstance();
         setupDebugMessenger();
@@ -2130,21 +2154,30 @@ private:
         createSwapChain();
         createImageViews();
         createRenderPass();
+        createShadowMapRenderPass();
 
         for (MaterialType* t: materialTypes)
         {
             t->createDescriptorSetLayout(device);
         }
 
+        createCommandPool();
+
+        load();
+
         createDescriptorSetLayout();
         createGraphicsPipelines();
-        createCommandPool();
         createDepthResources();
         createFramebuffers();
+        createShadowMapFramebuffers();
         createUniformBuffers();
         createDescriptorPool();
         createCommandBuffers();
         createSyncObjects();
+
+        createSSBOs();
+        createDescriptorSets();
+        initMeshes();
     }
 
     void createInstance()
@@ -2759,6 +2792,63 @@ private:
         }
     }
 
+    // Adapted from https://github.com/SaschaWillems/Vulkan/blob/master/examples/shadowmapping/shadowmapping.cpp#L192
+    void createShadowMapRenderPass()
+    {
+        VkAttachmentDescription depthAttachment{};
+        depthAttachment.format = findDepthFormat();
+        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthAttachmentRef{};
+        depthAttachmentRef.attachment = 0;
+        depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass {};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 0;
+        subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+        std::array<VkSubpassDependency, 2> dependencies {};
+        dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[0].dstSubpass = 0;
+        dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+        dependencies[1].srcSubpass = 0;
+        dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+        std::array<VkAttachmentDescription, 1> attachments = {depthAttachment};
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+        renderPassInfo.pAttachments = attachments.data();
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = dependencies.size();
+        renderPassInfo.pDependencies = dependencies.data();
+
+        auto result = vkCreateRenderPass(device, &renderPassInfo, null, &shadowRenderPass);
+        if (result != VK_SUCCESS)
+        {
+            printf("failed: %d\n", result);
+            throw std::runtime_error("shadow map render pass creation failed!");
+        }
+    }
+
     template<typename T>
     void createGraphicsPipeline(MaterialType &material, std::string vert, std::string frag, std::vector<VkPushConstantRange> uniforms)
     {
@@ -2866,7 +2956,7 @@ private:
         pipelineLayoutInfo.pPushConstantRanges = uniforms.data();
         pipelineLayoutInfo.pushConstantRangeCount = uniforms.size();
 
-        auto pipeline = &(material.pipeline);
+        auto pipeline = (material.getPipeline(scene));
         auto result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, null, &(pipeline->layout));
         if (result != VK_SUCCESS)
         {
@@ -2955,6 +3045,56 @@ private:
         }
     }
 
+    // Adapted from https://github.com/SaschaWillems/Vulkan/blob/master/examples/shadowmapping/shadowmapping.cpp#L192
+    void createShadowMapFramebuffers()
+    {
+        for (ShadowMap &sm: scene->shadowMaps)
+        {
+            for (size_t i = 0; i < sm.framebuffers.size(); i++)
+            {
+                createImage(sm.light->shadowRes, sm.light->shadowRes, findDepthFormat(), VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                            sm.images[i], sm.imageMemories[i]);
+                sm.imageViews[i] = createImageView(sm.images[i], findDepthFormat(), VK_IMAGE_ASPECT_DEPTH_BIT);
+
+                VkSamplerCreateInfo samplerCreateInfo {};
+                samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+                samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+                samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+                samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+                samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerCreateInfo.mipLodBias = 0.0f;
+                samplerCreateInfo.maxAnisotropy = 1.0f;
+                samplerCreateInfo.minLod = 0.0f;
+                samplerCreateInfo.maxLod = 1.0f;
+                samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+                auto result = vkCreateSampler(device, &samplerCreateInfo, null, &(sm.samplers[i]));
+                if (result != VK_SUCCESS)
+                {
+                    printf("failed: %d\n", result);
+                    throw std::runtime_error("shadow map sampler creation failed!");
+                }
+
+                VkFramebufferCreateInfo framebufferCreateInfo {};
+                framebufferCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+                framebufferCreateInfo.renderPass = shadowRenderPass;
+                framebufferCreateInfo.attachmentCount = 1;
+                framebufferCreateInfo.pAttachments = &(sm.imageViews[i]);
+                framebufferCreateInfo.width = sm.light->shadowRes;
+                framebufferCreateInfo.height = sm.light->shadowRes;
+                framebufferCreateInfo.layers = 1;
+
+                result = vkCreateFramebuffer(device, &framebufferCreateInfo, null, &(sm.framebuffers[i]));
+                if (result != VK_SUCCESS)
+                {
+                    printf("failed: %d\n", result);
+                    throw std::runtime_error("framebuffer creation failed!");
+                }
+            }
+        }
+    }
+
     void createGraphicsPipelines()
     {
         // Adapted from https://vkguide.dev/docs/chapter-3/push_constants/
@@ -2967,6 +3107,14 @@ private:
         createGraphicsPipeline<ComplexVertex>(materialTypeMirror, "spv/complex.vert.spv", "spv/mirror.frag.spv", {matrices});
         createGraphicsPipeline<ComplexVertex>(materialTypeLambertian, "spv/complex.vert.spv", "spv/lambertian.frag.spv", {matrices});
         createGraphicsPipeline<ComplexVertex>(materialTypePBR, "spv/complex.vert.spv", "spv/pbr.frag.spv", {matrices});
+
+        scene->drawingShadow = true;
+        createGraphicsPipeline<SimpleVertex>(materialTypeSimple, "spv/simple.vert.spv",  "spv/depth_simple.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypeEnvironment, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypeMirror, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypeLambertian, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypePBR, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices});
+        scene->drawingShadow = false;
     }
 
     void destroyGraphicsPipelines()
@@ -2975,6 +3123,8 @@ private:
         {
             vkDestroyPipeline(device, t->pipeline.pipeline, null);
             vkDestroyPipelineLayout(device, t->pipeline.layout, null);
+            vkDestroyPipeline(device, t->shadowMapPipeline.pipeline, null);
+            vkDestroyPipelineLayout(device, t->shadowMapPipeline.layout, null);
         }
     }
 
@@ -3240,6 +3390,7 @@ private:
         if (result != VK_SUCCESS)
         {
             printf("failed: %d\n", result);
+            abort();
             throw std::runtime_error("buffer memory allocation failed!");
         }
 
@@ -3336,7 +3487,7 @@ private:
 
     void createDescriptorPool()
     {
-        std::vector<VkDescriptorPoolSize> poolSizes (3);
+        std::vector<VkDescriptorPoolSize> poolSizes (4);
 
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
@@ -3344,6 +3495,8 @@ private:
         poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 2);
         poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         poolSizes[2].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
+        poolSizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[3].descriptorCount = std::max(1, scene->shadowCount) * max_frames_in_flight;
 
         VkDescriptorPoolCreateInfo poolInfo {};
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
@@ -3361,7 +3514,7 @@ private:
 
     void createDescriptorSetLayout()
     {
-        std::vector<VkDescriptorSetLayoutBinding> bindings(3);
+        std::vector<VkDescriptorSetLayoutBinding> bindings(4);
 
         VkDescriptorSetLayoutBinding uboLayoutBinding {};
         uboLayoutBinding.binding = 0;
@@ -3385,6 +3538,14 @@ private:
         ssboBinding.pImmutableSamplers = null;
         ssboBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[2] = ssboBinding;
+
+        VkDescriptorSetLayoutBinding shadowMapsBinding {};
+        shadowMapsBinding.binding = 4;
+        shadowMapsBinding.descriptorCount = std::max(1, scene->shadowCount);
+        shadowMapsBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shadowMapsBinding.pImmutableSamplers = null;
+        shadowMapsBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[3] = shadowMapsBinding;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo {};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3433,7 +3594,7 @@ private:
             envInfoLambertian.imageView = scene->environment->textureLambertian->imageView;
             envInfoLambertian.sampler = scene->environment->textureLambertian->sampler;
 
-            std::array<VkWriteDescriptorSet, 3> descriptorWrites {};
+            std::array<VkWriteDescriptorSet, 4> descriptorWrites {};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = globalDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3464,6 +3625,16 @@ private:
             descriptorWrites[2].descriptorCount = 1;
             descriptorWrites[2].pBufferInfo = &lights;
 
+            // TODO
+            std::array<VkDescriptorImageInfo, 1> shadowInfos {envInfoPBR};
+            descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[3].dstSet = globalDescriptorSets[i];
+            descriptorWrites[3].dstBinding = 4;
+            descriptorWrites[3].dstArrayElement = 0;
+            descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrites[3].descriptorCount = shadowInfos.size();
+            descriptorWrites[3].pImageInfo = shadowInfos.data();
+
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, null);
         }
     }
@@ -3486,26 +3657,57 @@ private:
         }
     }
 
+    void recordCommandBufferShadowPasses(VkCommandBuffer &commandBuffer, u32 imageIndex)
+    {
+        scene->drawingShadow = true;
+        VkClearValue clearDepth {};
+        clearDepth.depthStencil = {1.0, 0};
+
+        for (ShadowMap &sm: scene->shadowMaps)
+        {
+            VkRenderPassBeginInfo renderPassInfo{};
+            renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            renderPassInfo.renderPass = shadowRenderPass;
+            renderPassInfo.framebuffer = sm.framebuffers[imageIndex];
+            renderPassInfo.renderArea.offset = {0, 0};
+            renderPassInfo.renderArea.extent.width = sm.light->shadowRes;
+            renderPassInfo.renderArea.extent.height = sm.light->shadowRes;
+            renderPassInfo.clearValueCount = 1;
+            renderPassInfo.pClearValues = &clearDepth;
+
+            vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+            VkViewport viewport {};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = static_cast<float>(sm.light->shadowRes);
+            viewport.height = static_cast<float>(sm.light->shadowRes);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+            VkRect2D scissor {};
+            scissor.offset = {0, 0};
+            scissor.extent = renderPassInfo.renderArea.extent;
+            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+            // Constants recommended from https://github.com/SaschaWillems/Vulkan/blob/master/examples/shadowmapping/shadowmapping.cpp
+            vkCmdSetDepthBias(commandBuffer, 1.25f, 0, 1.75f);
+
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, materialTypeSimple.getPipeline(scene)->pipeline);
+            currentMaterialType = &materialTypeSimple;
+
+            draw(commandBuffer);
+
+            vkCmdEndRenderPass(commandBuffer);
+        }
+
+        scene->drawingShadow = false;
+    }
+
     float lastHeadlessTime = 0;
     void recordCommandBuffer(VkCommandBuffer commandBuffer, u32 imageIndex)
     {
-        if (!headless)
-        {
-            if (!timeRecorded)
-            {
-                lastRecordedTime = std::chrono::high_resolution_clock::now();
-                timeRecorded = true;
-                currentTime = 0.0f;
-            }
-            else
-            {
-                auto now = std::chrono::high_resolution_clock::now();
-                currentTime += timeRate * std::chrono::duration<float, std::chrono::seconds::period>(
-                        now - lastRecordedTime).count();
-                lastRecordedTime = now;
-            }
-        }
-
         VkCommandBufferBeginInfo beginInfo {};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -3515,6 +3717,8 @@ private:
             printf("failed: %d\n", result);
             throw std::runtime_error("beginning to record command buffer failed!");
         }
+
+        recordCommandBufferShadowPasses(commandBuffer, imageIndex);
 
         VkRenderPassBeginInfo renderPassInfo {};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3530,7 +3734,7 @@ private:
         renderPassInfo.pClearValues = clearValues.data();
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, materialTypeSimple.pipeline.pipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, materialTypeSimple.getPipeline(scene)->pipeline);
         currentMaterialType = &materialTypeSimple;
 
         VkViewport viewport {};
@@ -3566,6 +3770,20 @@ private:
         static int i = 0;
         i++;
 
+        draw(commandBuffer);
+
+        vkCmdEndRenderPass(commandBuffer);
+
+        auto result1 = vkEndCommandBuffer(commandBuffer);
+        if (result1 != VK_SUCCESS)
+        {
+            printf("failed: %d\n", result1);
+            throw std::runtime_error("ending to record command buffer failed!");
+        }
+    }
+
+    void draw(VkCommandBuffer &commandBuffer)
+    {
         mat4 transform = mat4::I();
 
         scene->detachedCamera->updateTransform();
@@ -3594,15 +3812,6 @@ private:
             {
                 r->draw(commandBuffer, transform, scene->currentCamera, enableCulling, currentTime);
             }
-        }
-
-        vkCmdEndRenderPass(commandBuffer);
-
-        auto result1 = vkEndCommandBuffer(commandBuffer);
-        if (result1 != VK_SUCCESS)
-        {
-            printf("failed: %d\n", result1);
-            throw std::runtime_error("ending to record command buffer failed!");
         }
     }
 
@@ -3655,9 +3864,6 @@ private:
         {
             r->precomputeLights(scene->shaderLights, scene->shadowCount, mat4::I(), mat4::I());
         }
-
-        createSSBOs();
-        createDescriptorSets();
     }
 
     void loop()
@@ -3890,6 +4096,20 @@ private:
                 printf("failed: %d\n", result);
                 throw std::runtime_error("acquiring next image failed!");
             }
+
+            if (!timeRecorded)
+            {
+                lastRecordedTime = std::chrono::high_resolution_clock::now();
+                timeRecorded = true;
+                currentTime = 0.0f;
+            }
+            else
+            {
+                auto now = std::chrono::high_resolution_clock::now();
+                currentTime += timeRate * std::chrono::duration<float, std::chrono::seconds::period>(
+                        now - lastRecordedTime).count();
+                lastRecordedTime = now;
+            }
         }
         else
         {
@@ -3932,7 +4152,7 @@ private:
 
         if (!headless)
         {
-            VkPresentInfoKHR presentInfo{};
+            VkPresentInfoKHR presentInfo {};
             presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
             presentInfo.waitSemaphoreCount = 1;
             presentInfo.pWaitSemaphores = signalSemaphores;
@@ -4015,7 +4235,7 @@ private:
         pc.modelView = m;
 
         // adapted from https://vkguide.dev/docs/chapter-3/push_constants/
-        vkCmdPushConstants(commandBuffers[currentFrame], currentMaterialType->pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+        vkCmdPushConstants(commandBuffers[currentFrame], currentMaterialType->getPipeline(scene)->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
     }
 
     void cleanup()
@@ -4045,6 +4265,7 @@ private:
         destroyGraphicsPipelines();
 
         vkDestroyRenderPass(device, renderPass, null);
+        vkDestroyRenderPass(device, shadowRenderPass, null);
 
         for (size_t i = 0; i < max_frames_in_flight; i++)
         {
