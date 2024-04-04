@@ -10,6 +10,7 @@ layout(location = 0) out vec4 fragColor;
 layout(location = 1) out mat3 fragTangentBasis;
 layout(location = 4) out vec2 fragTexCoord;
 layout(location = 5) out vec3 fragPosToCam;
+layout(location = 6) out vec3 fragWorldPos;
 
 layout(set = 0, binding = 0) uniform UniformBufferObject
 {
@@ -29,7 +30,8 @@ void main()
 {
     gl_Position = vec4(position, 1.0);
 
-    fragPosToCam = (pc.model * vec4(position, 1.0)).xyz - ubo.cameraPos.xyz;
+    fragWorldPos = (pc.model * vec4(position, 1.0)).xyz;
+    fragPosToCam = fragWorldPos - ubo.cameraPos.xyz;
     gl_Position = ubo.proj * ubo.camera * pc.model * vec4(position, 1.0);
     fragColor = color;
     fragTexCoord = texCoord;

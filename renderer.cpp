@@ -958,11 +958,6 @@ public:
             Material::createDescriptorSets(device);
             for (size_t i = 0; i < max_frames_in_flight; i++)
             {
-//                VkDescriptorBufferInfo bufferInfo {};
-//                bufferInfo.buffer = globalUniformBuffers[i];
-//                bufferInfo.offset = 0;
-//                bufferInfo.range = sizeof(PushConstant);
-
                 VkDescriptorImageInfo normalInfo {};
                 normalInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 normalInfo.imageView = normalMap->imageView;
@@ -986,15 +981,6 @@ public:
                 std::array<VkDescriptorImageInfo, 4> imageInfos {normalInfo, albedoInfo, roughnessInfo, metalnessInfo};
 
                 std::array<VkWriteDescriptorSet, 1> descriptorWrites {};
-
-                // switch this dynamically maybe
-//                descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-//                descriptorWrites[0].dstSet = descriptorSets[i];
-//                descriptorWrites[0].dstBinding = 0;
-//                descriptorWrites[0].dstArrayElement = 0;
-//                descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-//                descriptorWrites[0].descriptorCount = 1;
-//                descriptorWrites[0].pBufferInfo = &bufferInfo;
 
                 descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 descriptorWrites[0].dstSet = descriptorSets[i];
@@ -1120,6 +1106,67 @@ public:
         }
     };
 
+    struct Light
+    {
+        bool isSun = false;
+        std::string name;
+        float power;
+        vec3 tint = vec3(0, 0, 0);
+        mat4 worldToLightTransform = mat4::I();
+    };
+
+    // Format of data sent to shader for lights
+    struct alignas(16) ShaderLight
+    {
+        mat4 worldToLight;
+        mat4 projection;
+        vec4 tintPower;
+        float radius;
+        float limit;
+        float fov;
+        float blend;
+        int isSun;
+        int shadowRes;
+        int shadowIndex;
+    };
+
+    struct SunLight : Light
+    {
+        float angle;
+
+        SunLight(std::string name, vec3 tint, float angle, float power)
+        {
+            this->isSun = true;
+            this->name = name;
+            this->tint = tint;
+            this->angle = angle;
+            this->power = power;
+        }
+    };
+
+    struct SpotLight : Light
+    {
+        float radius;
+        float limit;
+
+        float fov;
+        float blend;
+
+        int shadowRes = 0;
+
+        SpotLight(std::string name, vec3 tint, float radius, float power, float limit = std::numeric_limits<float>::infinity(), float fov = -1, float blend = -1, int shadowRes = 0)
+        {
+            this->name = name;
+            this->tint = tint;
+            this->radius = radius;
+            this->power = power;
+            this->limit = limit;
+            this->fov = fov;
+            this->blend = blend;
+            this->shadowRes = shadowRes;
+        }
+    };
+
     struct Node
     {
         std::string name;
@@ -1139,6 +1186,7 @@ public:
         Camera* camera = null;
         Mesh* mesh = null;
         Environment* environment = null;
+        Light* light = null;
 
         explicit Node(const std::string &name,
                       vec3 translation = vec3(0.0f, 0.0f, 0.0f),
@@ -1245,7 +1293,8 @@ public:
             }
         }
 
-        void computeCameraAndEnvironment(mat4 m, mat4 mi)
+        // Computes transforms for cameras and environments
+        void precomputeTransforms(mat4 m, mat4 mi)
         {
             mat4 m2 = m * transform;
             mat4 m2i = invTransform * mi;
@@ -1261,7 +1310,45 @@ public:
 
             for (Node* n: children)
             {
-                n->computeCameraAndEnvironment(m2, m2i);
+                n->precomputeTransforms(m2, m2i);
+            }
+        }
+
+        // Computes shader information for lights
+        void precomputeLights(std::vector<ShaderLight> &shaderLights, int &shadowIndex, mat4 m, mat4 mi)
+        {
+            mat4 m2 = m * transform;
+            mat4 m2i = invTransform * mi;
+
+            if (light != null)
+            {
+                if (light->isSun)
+                {
+                    auto* s = (SunLight*) light;
+                    ShaderLight sl = {m2i, mat4::I(), vec4(s->tint, s->power), s->angle, -1, -1, -1, true};
+                    shaderLights.emplace_back(sl);
+                }
+                else
+                {
+                    auto* s = (SpotLight*) light;
+                    ShaderLight sl = {m2i, mat4::I(), vec4(s->tint, s->power), s->radius, s->limit, s->fov, s->blend, false};
+                    if (s->fov > 0)
+                    {
+                        sl.projection = mat4::perspective(1, s->fov, s->radius / 2, s->limit);
+                        sl.shadowRes = s->shadowRes;
+                        if (sl.shadowRes > 0)
+                        {
+                            sl.shadowIndex = shadowIndex;
+                            shadowIndex++;
+                        }
+                    }
+                    shaderLights.emplace_back(sl);
+                }
+            }
+
+            for (Node* n: children)
+            {
+                n->precomputeLights(shaderLights, shadowIndex, m2, m2i);
             }
         }
     };
@@ -1279,6 +1366,10 @@ public:
         std::map<int, Driver<dvec3>*> scaleDrivers;
         std::map<int, Environment*> environments;
         std::map<int, Material*> materials;
+        std::map<int, Light*> lights;
+
+        std::vector<ShaderLight> shaderLights {};
+        int shadowCount = 0;
 
         Environment* defaultEnvironment;
         Environment* environment;
@@ -1344,8 +1435,9 @@ public:
 
         std::map<int, Environment*> environments;
         std::map<int, Material*> materials;
+        std::map<int, Light*> lights;
 
-        Environment* env;
+        Environment* env = null;
 
         int cameraCount = 1;
         std::map<int, Camera*> camerasEnumerated;
@@ -1564,6 +1656,63 @@ public:
                 env = new Environment(name, new Texture(this, ob, 5), new Texture(this, ob, 1, ".l.png"));
                 environments.insert(std::pair(i, env));
             }
+            else if (type == "LIGHT")
+            {
+                std::string name = jstring::cast((*o)["name"])->value;
+                jarray* a = jarray::cast((*o)["tint"]);
+                vec3 tint = vec3((float) jnumber::cast((*a)[0])->value, (float) jnumber::cast((*a)[1])->value, (float) jnumber::cast((*a)[2])->value);
+
+                if ((*o)["sun"] != null)
+                {
+                    jobject* sun = jobject::cast((*o)["sun"]);
+                    float angle = (float) (jnumber::cast((*sun)["angle"])->value);
+                    float strength = (float) (jnumber::cast((*sun)["strength"])->value);
+                    SunLight* l = new SunLight(name, tint, angle, strength);
+                    lights.insert(std::pair(i, l));
+                }
+                else if ((*o)["sphere"] != null)
+                {
+                    jobject* sphere = jobject::cast((*o)["sphere"]);
+                    float radius = (float) (jnumber::cast((*sphere)["radius"])->value);
+                    float power = (float) (jnumber::cast((*sphere)["power"])->value);
+
+                    auto lim = jnumber::cast((*sphere)["limit"]);
+                    SpotLight* l;
+
+                    if (lim == null)
+                        l = new SpotLight(name, tint, radius, power);
+                    else
+                        l = new SpotLight(name, tint, radius, power, (float) (lim->value));
+
+                    lights.insert(std::pair(i, l));
+                }
+                else if ((*o)["spot"] != null)
+                {
+                    jobject* spot = jobject::cast((*o)["spot"]);
+                    float radius = (float) (jnumber::cast((*spot)["radius"])->value);
+                    float power = (float) (jnumber::cast((*spot)["power"])->value);
+                    auto lim = jnumber::cast((*spot)["limit"]);
+                    float limit;
+                    float fov = (float) (jnumber::cast((*spot)["fov"])->value);
+                    float blend = (float) (jnumber::cast((*spot)["blend"])->value);
+                    int shadow;
+
+                    auto jshadow = jnumber::cast((*spot)["shadow"]);
+
+                    if (lim != null)
+                        limit = (float) (lim->value);
+                    else
+                        limit = std::numeric_limits<float>::infinity();
+
+                    if (jshadow != null)
+                        shadow = (int) (jshadow->value);
+                    else
+                        shadow = 0;
+
+                    SpotLight* l = new SpotLight(name, tint, radius, power, limit, fov, blend, shadow);
+                    lights.insert(std::pair(i, l));
+                }
+            }
 
             i++;
         }
@@ -1612,6 +1761,10 @@ public:
                 jnumber* environment = jnumber::cast((*o)["environment"]);
                 if (environment != null)
                     nodes[i]->environment = environments.at((int) environment->value);
+
+                jnumber* light = jnumber::cast((*o)["light"]);
+                if (light != null)
+                    nodes[i]->light = lights.at((int) light->value);
             }
             else if (type == "DRIVER")
             {
@@ -1655,9 +1808,9 @@ public:
         scene->scaleDrivers = scales;
         scene->environments = environments;
         scene->materials = materials;
+        scene->lights = lights;
 
-        scene->defaultEnvironment = new Environment("default", new Texture(this, vec3(1, 1, 1), true), new Texture(this, vec3(1, 1, 1), true));
-
+        scene->defaultEnvironment = new Environment("default", new Texture(this, vec3(0, 0, 0), true), new Texture(this, vec3(0, 0, 0), true));
 
         if (env != null)
             scene->environment = env;
@@ -1831,6 +1984,9 @@ private:
     std::vector<VkBuffer> globalUniformBuffers;
     std::vector<VkDeviceMemory> globalUniformBuffersMemory;
     std::vector<void*> globalUniformBuffersMapped;
+
+    std::vector<VkBuffer> shaderStorageBuffers;
+    std::vector<VkDeviceMemory> shaderStorageBuffersMemory;
 
     VkDescriptorPool globalDescriptorPool;
     VkDescriptorSetLayout globalDescriptorSetLayout;
@@ -2837,6 +2993,20 @@ private:
         }
     }
 
+    void createSSBOs()
+    {
+        shaderStorageBuffers.resize(max_frames_in_flight);
+        shaderStorageBuffersMemory.resize(max_frames_in_flight);
+
+        for (int i = 0; i < max_frames_in_flight; i++)
+        {
+            VkDeviceSize size = scene->shaderLights.size() * sizeof(ShaderLight) + 16;
+            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         shaderStorageBuffers[i], shaderStorageBuffersMemory[i]);
+        }
+    }
+
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features)
     {
         for (VkFormat format: candidates)
@@ -3166,12 +3336,14 @@ private:
 
     void createDescriptorPool()
     {
-        std::vector<VkDescriptorPoolSize> poolSizes (2);
+        std::vector<VkDescriptorPoolSize> poolSizes (3);
 
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 2);
+        poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSizes[2].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
 
         VkDescriptorPoolCreateInfo poolInfo {};
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
@@ -3189,7 +3361,7 @@ private:
 
     void createDescriptorSetLayout()
     {
-        std::vector<VkDescriptorSetLayoutBinding> bindings(2);
+        std::vector<VkDescriptorSetLayoutBinding> bindings(3);
 
         VkDescriptorSetLayoutBinding uboLayoutBinding {};
         uboLayoutBinding.binding = 0;
@@ -3205,6 +3377,14 @@ private:
         samplerLayoutBinding.pImmutableSamplers = null;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[1] = samplerLayoutBinding;
+
+        VkDescriptorSetLayoutBinding ssboBinding {};
+        ssboBinding.binding = 3;
+        ssboBinding.descriptorCount = 1;
+        ssboBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        ssboBinding.pImmutableSamplers = null;
+        ssboBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[2] = ssboBinding;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo {};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3253,7 +3433,7 @@ private:
             envInfoLambertian.imageView = scene->environment->textureLambertian->imageView;
             envInfoLambertian.sampler = scene->environment->textureLambertian->sampler;
 
-            std::array<VkWriteDescriptorSet, 2> descriptorWrites {};
+            std::array<VkWriteDescriptorSet, 3> descriptorWrites {};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = globalDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3270,6 +3450,19 @@ private:
             descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             descriptorWrites[1].descriptorCount = imageInfos.size();
             descriptorWrites[1].pImageInfo = imageInfos.data();
+
+            VkDescriptorBufferInfo lights {};
+            lights.buffer = shaderStorageBuffers[i];
+            lights.offset = 0;
+            lights.range = sizeof(ShaderLight) * scene->shaderLights.size() + 16;
+
+            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[2].dstSet = globalDescriptorSets[i];
+            descriptorWrites[2].dstBinding = 3;
+            descriptorWrites[2].dstArrayElement = 0;
+            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[2].descriptorCount = 1;
+            descriptorWrites[2].pBufferInfo = &lights;
 
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, null);
         }
@@ -3384,9 +3577,18 @@ private:
         {
             for (auto r: scene->roots)
             {
-                r->computeCameraAndEnvironment(mat4::I(), mat4::I());
+                r->precomputeTransforms(mat4::I(), mat4::I());
             }
+
+            scene->shaderLights.clear();
+            scene->shadowCount = 0;
+            for (auto r: scene->roots)
+            {
+                r->precomputeLights(scene->shaderLights, scene->shadowCount, mat4::I(), mat4::I());
+            }
+
             updateUniformBuffer();
+            updateLightSSBOs();
 
             for (auto r: scene->roots)
             {
@@ -3449,6 +3651,12 @@ private:
 
         defaultMaterial.createDescriptorSets(device);
 
+        for (auto r: scene->roots)
+        {
+            r->precomputeLights(scene->shaderLights, scene->shadowCount, mat4::I(), mat4::I());
+        }
+
+        createSSBOs();
         createDescriptorSets();
     }
 
@@ -3779,15 +3987,32 @@ private:
         memcpy(globalUniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
     }
 
+    void updateLightSSBOs()
+    {
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        u32 size = scene->shaderLights.size() * sizeof(ShaderLight) + 16;
+        createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer,
+                     stagingBufferMemory);
+
+        void *data;
+        vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
+        memcpy((char*) data + 16, scene->shaderLights.data(), size - 16);
+        u32 s = scene->shaderLights.size();
+        memcpy(data, &s, 4);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        copyBuffer(stagingBuffer, shaderStorageBuffers[currentFrame], size);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+    }
+
     void updatePushConstants(mat4 m, u32 currentImage)
     {
         PushConstant pc {};
         pc.modelView = m;
-
-//        if (scene->debugCameraMode)
-//            pc.proj = scene->debugCamera->fullTransform;
-//        else
-//            pc.proj = scene->currentCamera->fullTransform;
 
         // adapted from https://vkguide.dev/docs/chapter-3/push_constants/
         vkCmdPushConstants(commandBuffers[currentFrame], currentMaterialType->pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
@@ -3804,6 +4029,8 @@ private:
         {
             vkDestroyBuffer(device, globalUniformBuffers[i], null);
             vkFreeMemory(device, globalUniformBuffersMemory[i], null);
+            vkDestroyBuffer(device, shaderStorageBuffers[i], null);
+            vkFreeMemory(device, shaderStorageBuffersMemory[i], null);
         }
 
         for (MaterialType* m: materialTypes)

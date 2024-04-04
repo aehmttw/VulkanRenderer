@@ -1,9 +1,11 @@
 #version 450
+#define PI 3.1415926535
 
 layout(location = 0) in vec4 fragColor;
 layout(location = 1) in mat3 fragTangentBasis;
 layout(location = 4) in vec2 fragTexCoord;
 layout(location = 5) in vec3 fragPosToCam;
+layout(location = 6) in vec3 fragWorldPos;
 
 layout(set = 0, binding = 0) uniform UniformBufferObject
 {
@@ -17,10 +19,51 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
 // 0 = PBR (5 mipmaps); 1 = Lambertian
 layout(set = 0, binding = 1) uniform samplerCube envTexSampler[2];
 
+struct Light
+{
+    mat4 worldToLight;
+    mat4 projection;
+    vec4 tintPower;
+    float radius;
+    float limit;
+    float fov;
+    float blend;
+    int isSun;
+    int shadowRes;
+    int shadowIndex;
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer Lights
+{
+    int lightsCount;
+    Light lights[ ];
+};
+
 // 0 = Normal map; 1 = Albedo; 2 = Roughness; 3 = Metalness
 layout(set = 1, binding = 0) uniform sampler2D texSampler[4];
 
 layout(location = 0) out vec4 outColor;
+
+// Vaguely adapted from https://learnopengl.com/PBR/Theory
+float getReflectance(vec3 inVec, vec3 outVec, float roughness)
+{
+    float d = dot(inVec, outVec);
+
+    // At really low values, floating point precision errors appear
+    roughness = max(0.001, roughness);
+    float r2 = roughness * roughness;
+
+    float v = abs(d) * d * (r2 - 1.0f) + 1.0f;
+    if (v < 0)
+        v = 0;
+
+    v = v * v * PI;
+
+    if (v > 0)
+        return d * r2 / v;
+
+    return 0;
+}
 
 void main()
 {
@@ -29,6 +72,7 @@ void main()
     float metalness = texture(texSampler[3], fragTexCoord).r;
 
     float lod = roughness * 5;
+    roughness = 0.05;
 
     vec3 normal = normalize(fragTangentBasis * (2.0 * texture(texSampler[0], fragTexCoord).xyz - vec3(1, 1, 1)));
     vec3 dir = normalize(fragPosToCam);
@@ -40,10 +84,74 @@ void main()
     float r0 = pow((1.0 - ior) / (1.0 + ior), 2.0);
     float schlick = r0 + (1 - r0) * pow(1 - cosAngle, 5);
 
-    vec4 specular = vec4(textureLod(envTexSampler[0], normalize((ubo.env * vec4(mirror, 0)).xyz), lod).xyz, 1.0);
+    // Use representative point from Epic Games:
+    // https://blog.selfshadow.com/publications/s2013-shading-course/karis/s2013_pbs_epic_notes_v2.pdf
+    vec3 additionalLight = vec3(0, 0, 0);
+    for (int i = 0; i < lightsCount; i++)
+    {
+        vec3 reflectLightDir = normalize((lights[i].worldToLight * vec4(mirror, 0)).xyz);
+        vec3 fragLightPoint = (lights[i].worldToLight * vec4(fragWorldPos, 1.0)).xyz;
+
+        vec3 lightDir = -fragLightPoint;
+
+        if (lights[i].isSun != 0)
+            lightDir = vec3(0, 0, 1);
+
+        // Closest point on ray to point:
+        // https://stackoverflow.com/questions/73452295/find-the-closest-point-on-a-ray-from-anotherlook-point
+        float d = dot(reflectLightDir, lightDir);
+        if (d > 0) // If the light is behind us it can't light us up
+        {
+            vec3 closestPos = -lightDir + d * reflectLightDir;
+            float distToCenter = length(closestPos);
+            vec3 closestPosNorm = closestPos / distToCenter;
+
+            float light;
+            vec3 closestPosOnSphere = closestPos;
+
+            if (distToCenter > lights[i].radius)
+                closestPosOnSphere = closestPosNorm * lights[i].radius;
+
+            vec3 outDir = normalize(closestPosOnSphere + lightDir);
+            light = getReflectance(reflectLightDir, outDir, roughness);
+
+            float intensity = 1.0;
+
+            // = tan(angle of light) / 2
+            float angleFactor;
+
+            if (lights[i].isSun == 0)
+            {
+                float dist = max(length(fragLightPoint), lights[i].radius);
+                intensity = max(0, 1.0 - pow(dist / lights[i].limit, 4)) * (1.0 / pow(dist, 2));
+                angleFactor = lights[i].radius / (2.0 * dist);
+            }
+            else
+                angleFactor = tan(lights[i].radius) / 2.0;
+
+            // alpha and alpha' in Epic's notes - clamped at 0.01 to prevent it from getting too dark
+            float a = pow(max(roughness, 0.1), 2.0);
+            float a1 = a + angleFactor;
+            // Normalization to account for conservation of power. See Epic Games paper linked above.
+            intensity *= pow(a / a1, 2.0);
+
+            if (lights[i].fov > 0)
+            {
+                vec3 dir = normalize(fragLightPoint);
+                float cosLightAngle = -dir.z;
+                float fovCosAngle = cos(lights[i].fov / 2.0);
+                float fovCosAngleBlend = cos(lights[i].fov * (1.0 - lights[i].blend) / 2.0);
+                float frac = max(min((fovCosAngleBlend - cosLightAngle) / (fovCosAngleBlend - fovCosAngle), 1.0), 0.0);
+                intensity *= 1.0 - pow(frac, 2.0);
+            }
+
+            additionalLight += light * lights[i].tintPower.rgb * lights[i].tintPower.a * intensity;
+        }
+    }
+
+    vec4 specular = vec4(textureLod(envTexSampler[0], normalize((ubo.env * vec4(mirror, 0)).xyz), lod).xyz + additionalLight, 1.0);
     vec4 metalColor = specular * albedo;
     vec4 dielectricColor = albedo + vec4(specular.xyz, 0) * schlick;
-
     outColor = metalColor * metalness + dielectricColor * (1.0 - metalness);
 
     if (!ubo.hdr)
