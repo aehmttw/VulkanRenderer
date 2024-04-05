@@ -1252,7 +1252,6 @@ public:
         void draw(VkCommandBuffer b, mat4 m, Camera* camera, bool enableCulling, float time)
         {
             assert(this);
-
             this->computeDriverTransforms(time);
 
             mat4 m2 = m * transform;
@@ -3860,10 +3859,21 @@ private:
             updateUniformBuffer();
             updateLightSSBOs();
 
+            Camera* cam = scene->currentCamera;
+            if (scene->drawingShadow)
+            {
+                ShaderLight sl = scene->shaderLights[scene->currentShadowMapIndex];
+                cam = new Camera("shadow", 1, sl.fov, sl.radius, sl.limit);
+                cam->cameraUserOffsetTransform = sl.worldToLight;
+            }
+
             for (auto r: scene->roots)
             {
-                r->draw(commandBuffer, transform, scene->currentCamera, enableCulling, currentTime);
+                r->draw(commandBuffer, transform, cam, enableCulling, currentTime);
             }
+
+            if (scene->drawingShadow)
+                delete cam;
         }
     }
 
@@ -4280,6 +4290,12 @@ private:
         {
             if (sl.shadowRes <= 0)
                 lights.emplace_back(sl);
+        }
+
+        scene->shaderLights.clear();
+        for (ShaderLight sl: lights)
+        {
+            scene->shaderLights.emplace_back(sl);
         }
 
         void *data;
