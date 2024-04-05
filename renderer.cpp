@@ -1372,6 +1372,8 @@ public:
                             if (!init)
                                 shadowMaps.emplace_back(ShadowMap(shaderLights.size() - 1, sl.shadowRes));
                         }
+                        else
+                            shaderLights.emplace_back(sl);
                     }
                     else
                         shaderLights.emplace_back(sl);
