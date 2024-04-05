@@ -32,7 +32,7 @@ const std::vector<const char*> validationLayers =
 
 const std::vector<const char*> deviceExtensions =
         {
-            VK_KHR_SWAPCHAIN_EXTENSION_NAME
+            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         };
 
 const std::vector<const char*> deviceExtensionsHeadless =
@@ -223,6 +223,7 @@ struct UniformBufferObject
 struct PushConstant
 {
     alignas(16) mat4 modelView;
+    int shadowMap;
 };
 
 // A good portion of this code is adapted from the official Vulkan tutorial: https://docs.vulkan.org/tutorial/latest/
@@ -802,9 +803,9 @@ public:
         GraphicsPipeline* getPipeline(Scene* scene)
         {
             if (scene->drawingShadow)
-                return &pipeline;
-            else
                 return &shadowMapPipeline;
+            else
+                return &pipeline;
         }
 
         u32 stride;
@@ -1137,7 +1138,6 @@ public:
         float blend;
         int isSun;
         int shadowRes;
-        int shadowIndex;
     };
 
     struct ShadowMap
@@ -1147,7 +1147,12 @@ public:
         std::vector<VkDeviceMemory> imageMemories {max_frames_in_flight};
         std::vector<VkImageView> imageViews {max_frames_in_flight};
         std::vector<VkSampler> samplers {max_frames_in_flight};
-        ShaderLight* light;
+        int resolution;
+
+        ShadowMap(int l, int res)
+        {
+            this->resolution = res;
+        }
     };
 
     struct SunLight : Light
@@ -1335,7 +1340,7 @@ public:
         }
 
         // Computes shader information for lights
-        void precomputeLights(std::vector<ShaderLight> &shaderLights, int &shadowIndex, mat4 m, mat4 mi)
+        void precomputeLights(std::vector<ShaderLight> &shaderLights, std::vector<ShadowMap> &shadowMaps, bool init, int &shadowIndex, mat4 m, mat4 mi)
         {
             mat4 m2 = m * transform;
             mat4 m2i = invTransform * mi;
@@ -1354,21 +1359,29 @@ public:
                     ShaderLight sl = {m2i, mat4::I(), vec4(s->tint, s->power), s->radius, s->limit, s->fov, s->blend, false};
                     if (s->fov > 0)
                     {
-                        sl.projection = mat4::perspective(1, s->fov, s->radius / 2, s->limit);
+                        if (isinf(s->limit))
+                            sl.projection = mat4::infinitePerspective(1, s->fov, s->radius);
+                        else
+                            sl.projection = mat4::perspective(1, s->fov, s->radius, s->limit);
+
                         sl.shadowRes = s->shadowRes;
                         if (sl.shadowRes > 0)
                         {
-                            sl.shadowIndex = shadowIndex;
+                            shaderLights.emplace_back(sl);
                             shadowIndex++;
+
+                            if (!init)
+                                shadowMaps.emplace_back(ShadowMap(shaderLights.size() - 1, sl.shadowRes));
                         }
                     }
-                    shaderLights.emplace_back(sl);
+                    else
+                        shaderLights.emplace_back(sl);
                 }
             }
 
             for (Node* n: children)
             {
-                n->precomputeLights(shaderLights, shadowIndex, m2, m2i);
+                n->precomputeLights(shaderLights, shadowMaps, init, shadowIndex, m2, m2i);
             }
         }
     };
@@ -1393,6 +1406,8 @@ public:
         int shadowCount = 0;
 
         bool drawingShadow = false;
+        int currentShadowMapIndex;
+        ShadowMap* currentShadowMap = null;
 
         Environment* defaultEnvironment;
         Environment* environment;
@@ -1407,6 +1422,8 @@ public:
 
         Camera* currentCamera = detachedCamera;
         bool debugCameraMode = false;
+
+        bool initialized = false;
 
         Scene(std::string name)
         {
@@ -1720,7 +1737,7 @@ public:
                     float blend = (float) (jnumber::cast((*spot)["blend"])->value);
                     int shadow;
 
-                    auto jshadow = jnumber::cast((*spot)["shadow"]);
+                    auto jshadow = jnumber::cast((*o)["shadow"]);
 
                     if (lim != null)
                         limit = (float) (lim->value);
@@ -2191,7 +2208,7 @@ private:
         appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
         appInfo.pEngineName = "No Engine";
         appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-        appInfo.apiVersion = VK_API_VERSION_1_0;
+        appInfo.apiVersion = VK_API_VERSION_1_2;
 
         VkInstanceCreateInfo createInfo {};
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -2513,10 +2530,16 @@ private:
             queueCreateInfos.push_back(queueCreateInfo);
         }
 
-        VkPhysicalDeviceFeatures deviceFeatures {};
+        VkPhysicalDeviceVulkan12Features device12Features {};
+        device12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        device12Features.runtimeDescriptorArray = true;
+
+        VkPhysicalDeviceFeatures2 deviceFeatures {};
+        deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        deviceFeatures.features.samplerAnisotropy = VK_TRUE;
+        deviceFeatures.pNext = &device12Features;
 
         VkDeviceCreateInfo createInfo {};
-        deviceFeatures.samplerAnisotropy = VK_TRUE;
 
         std::vector<const char*> extensions;
 
@@ -2529,7 +2552,7 @@ private:
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
         createInfo.queueCreateInfoCount = static_cast<u32>(queueCreateInfos.size());
-        createInfo.pEnabledFeatures = &deviceFeatures;
+        createInfo.pNext = &deviceFeatures;
 
         createInfo.enabledExtensionCount = extensions.size();
         createInfo.ppEnabledExtensionNames = extensions.data();
@@ -2799,11 +2822,11 @@ private:
         depthAttachment.format = findDepthFormat();
         depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
         depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
         VkAttachmentReference depthAttachmentRef{};
         depthAttachmentRef.attachment = 0;
@@ -2922,7 +2945,12 @@ private:
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+
+        if (scene->drawingShadow)
+            rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT;
+        else
+            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -2985,7 +3013,12 @@ private:
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &dynamicState;
         pipelineInfo.layout = pipeline->layout;
-        pipelineInfo.renderPass = renderPass;
+
+        if (scene->drawingShadow)
+            pipelineInfo.renderPass = shadowRenderPass;
+        else
+            pipelineInfo.renderPass = renderPass;
+
         pipelineInfo.subpass = 0;
         pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
         pipelineInfo.basePipelineIndex = -1;
@@ -3052,14 +3085,14 @@ private:
         {
             for (size_t i = 0; i < sm.framebuffers.size(); i++)
             {
-                createImage(sm.light->shadowRes, sm.light->shadowRes, findDepthFormat(), VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                createImage(sm.resolution, sm.resolution, findDepthFormat(), VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                             sm.images[i], sm.imageMemories[i]);
                 sm.imageViews[i] = createImageView(sm.images[i], findDepthFormat(), VK_IMAGE_ASPECT_DEPTH_BIT);
 
                 VkSamplerCreateInfo samplerCreateInfo {};
                 samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-                samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-                samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+                samplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+                samplerCreateInfo.minFilter = VK_FILTER_NEAREST;
                 samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
                 samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
                 samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -3081,8 +3114,8 @@ private:
                 framebufferCreateInfo.renderPass = shadowRenderPass;
                 framebufferCreateInfo.attachmentCount = 1;
                 framebufferCreateInfo.pAttachments = &(sm.imageViews[i]);
-                framebufferCreateInfo.width = sm.light->shadowRes;
-                framebufferCreateInfo.height = sm.light->shadowRes;
+                framebufferCreateInfo.width = sm.resolution;
+                framebufferCreateInfo.height = sm.resolution;
                 framebufferCreateInfo.layers = 1;
 
                 result = vkCreateFramebuffer(device, &framebufferCreateInfo, null, &(sm.framebuffers[i]));
@@ -3536,7 +3569,7 @@ private:
         ssboBinding.descriptorCount = 1;
         ssboBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         ssboBinding.pImmutableSamplers = null;
-        ssboBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        ssboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[2] = ssboBinding;
 
         VkDescriptorSetLayoutBinding shadowMapsBinding {};
@@ -3625,8 +3658,16 @@ private:
             descriptorWrites[2].descriptorCount = 1;
             descriptorWrites[2].pBufferInfo = &lights;
 
-            // TODO
-            std::array<VkDescriptorImageInfo, 1> shadowInfos {envInfoPBR};
+            std::vector<VkDescriptorImageInfo> shadowInfos (scene->shadowCount);
+            for (int s = 0; s < scene->shadowMaps.size(); s++)
+            {
+                VkDescriptorImageInfo descriptorImageInfo {};
+                descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+                descriptorImageInfo.imageView = scene->shadowMaps[s].imageViews[i];
+                descriptorImageInfo.sampler = scene->shadowMaps[s].samplers[i];
+                shadowInfos[s] = descriptorImageInfo;
+            }
+
             descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[3].dstSet = globalDescriptorSets[i];
             descriptorWrites[3].dstBinding = 4;
@@ -3635,7 +3676,11 @@ private:
             descriptorWrites[3].descriptorCount = shadowInfos.size();
             descriptorWrites[3].pImageInfo = shadowInfos.data();
 
-            vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, null);
+            int count = descriptorWrites.size();
+            if (scene->shadowMaps.empty())
+                count--;
+
+            vkUpdateDescriptorSets(device, count, descriptorWrites.data(), 0, null);
         }
     }
 
@@ -3657,21 +3702,27 @@ private:
         }
     }
 
-    void recordCommandBufferShadowPasses(VkCommandBuffer &commandBuffer, u32 imageIndex)
+    void recordCommandBufferShadowPasses(VkCommandBuffer &commandBuffer)
     {
         scene->drawingShadow = true;
         VkClearValue clearDepth {};
         clearDepth.depthStencil = {1.0, 0};
 
+        int in = 0;
         for (ShadowMap &sm: scene->shadowMaps)
         {
-            VkRenderPassBeginInfo renderPassInfo{};
+            scene->currentShadowMapIndex = in;
+            in++;
+            scene->currentShadowMap = &sm;
+
+            assert(sm.resolution > 0);
+            VkRenderPassBeginInfo renderPassInfo {};
             renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
             renderPassInfo.renderPass = shadowRenderPass;
-            renderPassInfo.framebuffer = sm.framebuffers[imageIndex];
+            renderPassInfo.framebuffer = sm.framebuffers[currentFrame];
             renderPassInfo.renderArea.offset = {0, 0};
-            renderPassInfo.renderArea.extent.width = sm.light->shadowRes;
-            renderPassInfo.renderArea.extent.height = sm.light->shadowRes;
+            renderPassInfo.renderArea.extent.width = sm.resolution;
+            renderPassInfo.renderArea.extent.height = sm.resolution;
             renderPassInfo.clearValueCount = 1;
             renderPassInfo.pClearValues = &clearDepth;
 
@@ -3680,8 +3731,8 @@ private:
             VkViewport viewport {};
             viewport.x = 0.0f;
             viewport.y = 0.0f;
-            viewport.width = static_cast<float>(sm.light->shadowRes);
-            viewport.height = static_cast<float>(sm.light->shadowRes);
+            viewport.width = static_cast<float>(sm.resolution);
+            viewport.height = static_cast<float>(sm.resolution);
             viewport.minDepth = 0.0f;
             viewport.maxDepth = 1.0f;
             vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -3702,6 +3753,7 @@ private:
             vkCmdEndRenderPass(commandBuffer);
         }
 
+        scene->currentShadowMap = null;
         scene->drawingShadow = false;
     }
 
@@ -3718,7 +3770,7 @@ private:
             throw std::runtime_error("beginning to record command buffer failed!");
         }
 
-        recordCommandBufferShadowPasses(commandBuffer, imageIndex);
+        recordCommandBufferShadowPasses(commandBuffer);
 
         VkRenderPassBeginInfo renderPassInfo {};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3802,7 +3854,7 @@ private:
             scene->shadowCount = 0;
             for (auto r: scene->roots)
             {
-                r->precomputeLights(scene->shaderLights, scene->shadowCount, mat4::I(), mat4::I());
+                r->precomputeLights(scene->shaderLights, scene->shadowMaps, scene->initialized, scene->shadowCount, mat4::I(), mat4::I());
             }
 
             updateUniformBuffer();
@@ -3862,8 +3914,9 @@ private:
 
         for (auto r: scene->roots)
         {
-            r->precomputeLights(scene->shaderLights, scene->shadowCount, mat4::I(), mat4::I());
+            r->precomputeLights(scene->shaderLights, scene->shadowMaps, scene->initialized, scene->shadowCount, mat4::I(), mat4::I());
         }
+        scene->initialized = true;
     }
 
     void loop()
@@ -4216,10 +4269,23 @@ private:
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer,
                      stagingBufferMemory);
 
+        std::vector<ShaderLight> lights {};
+        for (ShaderLight sl: scene->shaderLights)
+        {
+            if (sl.shadowRes > 0)
+                lights.emplace_back(sl);
+        }
+
+        for (ShaderLight sl: scene->shaderLights)
+        {
+            if (sl.shadowRes <= 0)
+                lights.emplace_back(sl);
+        }
+
         void *data;
         vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
-        memcpy((char*) data + 16, scene->shaderLights.data(), size - 16);
-        u32 s = scene->shaderLights.size();
+        memcpy((char*) data + 16, lights.data(), size - 16);
+        u32 s = lights.size();
         memcpy(data, &s, 4);
         vkUnmapMemory(device, stagingBufferMemory);
 
@@ -4234,12 +4300,31 @@ private:
         PushConstant pc {};
         pc.modelView = m;
 
+        if (scene->drawingShadow)
+            pc.shadowMap = scene->currentShadowMapIndex;
+        else
+            pc.shadowMap = -1;
+
         // adapted from https://vkguide.dev/docs/chapter-3/push_constants/
         vkCmdPushConstants(commandBuffers[currentFrame], currentMaterialType->getPipeline(scene)->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
     }
 
     void cleanup()
     {
+        for (ShadowMap &s: this->scene->shadowMaps)
+        {
+            for (int i = 0; i < s.framebuffers.size(); i++)
+            {
+                vkDestroySampler(device, s.samplers[i], nullptr);
+                vkDestroyImageView(device, s.imageViews[i], nullptr);
+
+                vkDestroyImage(device, s.images[i], nullptr);
+                vkFreeMemory(device, s.imageMemories[i], nullptr);
+
+                vkDestroyFramebuffer(device, s.framebuffers[i], null);
+            }
+        }
+
         if (this->scene != null)
             delete this->scene;
 

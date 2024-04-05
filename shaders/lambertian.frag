@@ -1,5 +1,6 @@
 #version 450
 #define PI 3.1415926535
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(location = 0) in vec4 fragColor;
 layout(location = 1) in mat3 fragTangentBasis;
@@ -30,7 +31,6 @@ struct Light
     float blend;
     int isSun;
     int shadowRes;
-    int shadowIndex;
 };
 
 layout(std430, set = 0, binding = 3) readonly buffer Lights
@@ -38,6 +38,9 @@ layout(std430, set = 0, binding = 3) readonly buffer Lights
     int lightsCount;
     Light lights[ ];
 };
+
+// n + 4: nth shadow map
+layout(set = 0, binding = 4) uniform sampler2D shadowMap[ ];
 
 // 0 = Normal map; 1 = Albedo
 layout(set = 1, binding = 0) uniform sampler2D texSampler[2];
@@ -76,7 +79,38 @@ void main()
                 intensity *= 1.0 - pow(frac, 2.0);
             }
 
-            additionalLight += light * lights[i].tintPower.rgb * lights[i].tintPower.a * intensity;
+            vec3 l = light * lights[i].tintPower.rgb * lights[i].tintPower.a * intensity;
+            if (lights[i].shadowRes <= 0)
+                additionalLight += l;
+            else
+            {
+                vec4 lightPos1 = lights[i].projection * vec4(pos, 1.0);
+                lightPos1.xyz /= lightPos1.w;
+                lightPos1.xy = (lightPos1.xy / 2.0 + 0.5);
+                float texSize = 1.0 / float(lights[i].shadowRes);
+
+                float totalFrac = 0;
+                for (int x = -1; x <= 1; x++)
+                {
+                    for (int y = -1; y <= 1; y++)
+                    {
+                        vec4 lightPos = lightPos1 + vec4(float(x) * texSize, float(y) * texSize, 0, 0);
+
+                        float t1 = float(lightPos.z <= texture(shadowMap[i], lightPos.xy + vec2(-0.5 * texSize, -0.5 * texSize)).x);
+                        float t2 = float(lightPos.z <= texture(shadowMap[i], lightPos.xy + vec2(0.5 * texSize, -0.5 * texSize)).x);
+                        float t3 = float(lightPos.z <= texture(shadowMap[i], lightPos.xy + vec2(-0.5 * texSize, 0.5 * texSize)).x);
+                        float t4 = float(lightPos.z <= texture(shadowMap[i], lightPos.xy + vec2(0.5 * texSize, 0.5 * texSize)).x);
+
+                        vec2 coord = vec2(lightPos.xy / texSize) - 0.5;
+                        vec2 frac2 = coord - vec2(float(int(coord.x)), float(int(coord.y)));
+                        float frac = (t1 * (1.0 - frac2.x) + t2 * (frac2.x)) * (1.0 - frac2.y) + (t3 * (1.0 - frac2.x) + t4 * (frac2.x)) * frac2.y;
+
+                        totalFrac += frac;
+                    }
+                }
+
+                additionalLight += totalFrac / 9.0 * l;
+            }
         }
     }
 

@@ -21,9 +21,29 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
     bool hdr;
 } ubo;
 
+struct Light
+{
+    mat4 worldToLight;
+    mat4 projection;
+    vec4 tintPower;
+    float radius;
+    float limit;
+    float fov;
+    float blend;
+    int isSun;
+    int shadowRes;
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer Lights
+{
+    int lightsCount;
+    Light lights[ ];
+};
+
 layout(push_constant) uniform PushConstant
 {
     mat4 model;
+    int shadowMap;
 } pc;
 
 void main()
@@ -32,7 +52,12 @@ void main()
 
     fragWorldPos = (pc.model * vec4(position, 1.0)).xyz;
     fragPosToCam = fragWorldPos - ubo.cameraPos.xyz;
-    gl_Position = ubo.proj * ubo.camera * pc.model * vec4(position, 1.0);
+
+    if (pc.shadowMap >= 0)
+        gl_Position = lights[pc.shadowMap].projection * lights[pc.shadowMap].worldToLight * vec4(fragWorldPos, 1.0);
+    else
+        gl_Position = ubo.proj * ubo.camera * vec4(fragWorldPos, 1.0);
+
     fragColor = color;
     fragTexCoord = texCoord;
 
