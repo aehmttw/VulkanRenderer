@@ -46,6 +46,7 @@ layout(set = 0, binding = 4) uniform sampler2D shadowMap[ ];
 layout(set = 1, binding = 0) uniform sampler2D texSampler[4];
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outNormal;
 
 // Vaguely adapted from https://learnopengl.com/PBR/Theory
 float getReflectance(vec3 inVec, vec3 outVec, float roughness)
@@ -198,4 +199,6 @@ void main()
         vec3 corrected_color = pow(outColor.rgb, vec3(1.0 / 2.2));
         outColor = vec4(corrected_color / (corrected_color + vec3(1, 1, 1)), outColor.a);
     }
+
+    outNormal = vec4(normal, 1.0);
 }

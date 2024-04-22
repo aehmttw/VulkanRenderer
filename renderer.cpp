@@ -746,7 +746,7 @@ public:
             samplerInfo.minLod = 0.0f;
             samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
 
-            auto result = vkCreateSampler(renderer->device, &samplerInfo, nullptr, &(this->sampler));
+            auto result = vkCreateSampler(renderer->device, &samplerInfo, null, &(this->sampler));
 
             if (result != VK_SUCCESS)
             {
@@ -811,11 +811,11 @@ public:
 
         ~Texture()
         {
-            vkDestroySampler(renderer->device, sampler, nullptr);
-            vkDestroyImageView(renderer->device, imageView, nullptr);
+            vkDestroySampler(renderer->device, sampler, null);
+            vkDestroyImageView(renderer->device, imageView, null);
 
-            vkDestroyImage(renderer->device, image, nullptr);
-            vkFreeMemory(renderer->device, imageMemory, nullptr);
+            vkDestroyImage(renderer->device, image, null);
+            vkFreeMemory(renderer->device, imageMemory, null);
         }
     };
 
@@ -1942,8 +1942,8 @@ public:
 
         copyBuffer(staging, panelBuffer, sizeof(postPanel));
 
-        vkDestroyBuffer(device, staging, nullptr);
-        vkFreeMemory(device, stagingMemory, nullptr);
+        vkDestroyBuffer(device, staging, null);
+        vkFreeMemory(device, stagingMemory, null);
     }
 
     char* sceneName = null;
@@ -1955,7 +1955,7 @@ public:
     char* requestedPhysicalDeviceName = null;
     bool logStats = false;
     bool hdr = false;
-    bool postPass = false;
+    bool postPass = true;
 
     int headlessIndex = 0;
     long swapchainTime = 0;
@@ -2125,6 +2125,7 @@ private:
     std::vector<int> keysPressed;
 
     std::vector<VkFramebuffer> mainPassFramebuffers {max_frames_in_flight};
+
     std::vector<VkImage> mainPassImages {max_frames_in_flight};
     std::vector<VkDeviceMemory> mainPassImageMemories {max_frames_in_flight};
     std::vector<VkImageView> mainPassImageViews {max_frames_in_flight};
@@ -2134,6 +2135,13 @@ private:
     std::vector<VkDeviceMemory> mainPassDepthImageMemories {max_frames_in_flight};
     std::vector<VkImageView> mainPassDepthImageViews {max_frames_in_flight};
     std::vector<VkSampler> mainPassDepthSamplers {max_frames_in_flight};
+
+    std::vector<VkImage> mainPassNormalImages {max_frames_in_flight};
+    std::vector<VkDeviceMemory> mainPassNormalImageMemories {max_frames_in_flight};
+    std::vector<VkImageView> mainPassNormalImageViews {max_frames_in_flight};
+    std::vector<VkSampler> mainPassNormalSamplers {max_frames_in_flight};
+
+
 
     VkBuffer panelBuffer;
     VkDeviceMemory panelBufferMemory;
@@ -2887,14 +2895,20 @@ private:
         colorAttachmentRef.attachment = 0;
         colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+        VkAttachmentReference normalAttachmentRef {};
+        normalAttachmentRef.attachment = 1;
+        normalAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
         VkAttachmentReference depthAttachmentRef{};
-        depthAttachmentRef.attachment = 1;
+        depthAttachmentRef.attachment = 2;
         depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        std::array<VkAttachmentReference, 2> attachmentRefs {colorAttachmentRef, normalAttachmentRef};
 
         VkSubpassDescription subpass {};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &colorAttachmentRef;
+        subpass.colorAttachmentCount = attachmentRefs.size();
+        subpass.pColorAttachments = attachmentRefs.data();
         subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
         std::vector<VkSubpassDependency> dependencies {};
@@ -2933,7 +2947,7 @@ private:
             dependencies.emplace_back(dependency);
         }
 
-        std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
+        std::array<VkAttachmentDescription, 3> attachments = {colorAttachment, colorAttachment, depthAttachment};
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -2979,6 +2993,13 @@ private:
                 {
                     printf("failed: %d\n", result);
                     throw std::runtime_error("main pass depth sampler creation failed!");
+                }
+
+                result = vkCreateSampler(device, &samplerCreateInfo, null, &(mainPassNormalSamplers[i]));
+                if (result != VK_SUCCESS)
+                {
+                    printf("failed: %d\n", result);
+                    throw std::runtime_error("main pass normal sampler creation failed!");
                 }
             }
         }
@@ -3212,11 +3233,12 @@ private:
         colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
+        std::array<VkPipelineColorBlendAttachmentState, 2> cbas {colorBlendAttachment, colorBlendAttachment};
         VkPipelineColorBlendStateCreateInfo colorBlending {};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         colorBlending.logicOpEnable = VK_FALSE;
-        colorBlending.attachmentCount = 1;
-        colorBlending.pAttachments = &colorBlendAttachment;
+        colorBlending.attachmentCount = (shadow || post) ? 1 : 2;
+        colorBlending.pAttachments = cbas.data();
 
         std::vector<VkDescriptorSetLayout> layouts;
 
@@ -3821,7 +3843,7 @@ private:
 
         std::vector<VkDescriptorPoolSize> poolSizes (1);
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 2);
+        poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 3);
 
         VkDescriptorPoolCreateInfo poolInfo {};
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
@@ -3894,7 +3916,7 @@ private:
 
         VkDescriptorSetLayoutBinding samplerLayoutBinding {};
         samplerLayoutBinding.binding = 0;
-        samplerLayoutBinding.descriptorCount = 2;
+        samplerLayoutBinding.descriptorCount = 3;
         samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBinding.pImmutableSamplers = null;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -4024,6 +4046,14 @@ private:
             throw std::runtime_error("descriptor sets creation failed!");
         }
 
+        updatePostDescriptors();
+    }
+
+    void updatePostDescriptors()
+    {
+        if (!postPass)
+            return;
+
         for (size_t i = 0; i < max_frames_in_flight; i++)
         {
             VkDescriptorImageInfo color {};
@@ -4036,8 +4066,13 @@ private:
             depth.imageView = mainPassDepthImageViews[i];
             depth.sampler = mainPassDepthSamplers[i];
 
+            VkDescriptorImageInfo normal {};
+            normal.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            normal.imageView = mainPassNormalImageViews[i];
+            normal.sampler = mainPassNormalSamplers[i];
+
             std::array<VkWriteDescriptorSet, 1> descriptorWrites {};
-            std::array<VkDescriptorImageInfo, 2> imageInfos {color, depth};
+            std::array<VkDescriptorImageInfo, 3> imageInfos {color, normal, depth};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = postDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -4135,6 +4170,15 @@ private:
         renderPassInfo.renderArea.offset = {0, 0};
         renderPassInfo.renderArea.extent = swapChainExtent;
 
+        VkViewport viewport {};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(swapChainExtent.width);
+        viewport.height = static_cast<float>(swapChainExtent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
         std::array<VkClearValue, 2> clearValues {};
         clearValues[0].color = {scene->debugCameraMode ? 0.2f : 0.0f, 0.0f, 0.0f, 1.0f};
         clearValues[1].depthStencil = {1.0f, 0};
@@ -4180,9 +4224,10 @@ private:
         renderPassInfo.renderArea.offset = {0, 0};
         renderPassInfo.renderArea.extent = swapChainExtent;
 
-        std::array<VkClearValue, 2> clearValues {};
+        std::array<VkClearValue, 3> clearValues {};
         clearValues[0].color = {scene->debugCameraMode ? 0.2f : 0.0f, 0.0f, 0.0f, 1.0f};
-        clearValues[1].depthStencil = {1.0f, 0};
+        clearValues[1].color = {0, 0, 1, 1};
+        clearValues[2].depthStencil = {1.0f, 0};
         renderPassInfo.clearValueCount = clearValues.size();
         renderPassInfo.pClearValues = clearValues.data();
 
@@ -4718,8 +4763,8 @@ private:
 
         copyBuffer(stagingBuffer, shaderStorageBuffers[currentFrame], size);
 
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        vkFreeMemory(device, stagingBufferMemory, nullptr);
+        vkDestroyBuffer(device, stagingBuffer, null);
+        vkFreeMemory(device, stagingBufferMemory, null);
     }
 
     void updatePushConstants(mat4 m, u32 currentImage)
@@ -4760,8 +4805,10 @@ private:
 
         for (int i = 0; i < max_frames_in_flight; i++)
         {
-            vkDestroySampler(device, mainPassSamplers[i], nullptr);
-            vkDestroySampler(device, mainPassDepthSamplers[i], nullptr);
+            vkDestroySampler(device, mainPassSamplers[i], null);
+            vkDestroySampler(device, mainPassDepthSamplers[i], null);
+            vkDestroySampler(device, mainPassNormalSamplers[i], null);
+
         }
 
         cleanupSwapChain();
@@ -4841,15 +4888,20 @@ private:
         {
             for (int i = 0; i < max_frames_in_flight; i++)
             {
-                vkDestroyImageView(device, mainPassImageViews[i], nullptr);
-                vkDestroyImage(device, mainPassImages[i], nullptr);
-                vkFreeMemory(device, mainPassImageMemories[i], nullptr);
+                vkDestroyImageView(device, mainPassImageViews[i], null);
+                vkDestroyImage(device, mainPassImages[i], null);
+                vkFreeMemory(device, mainPassImageMemories[i], null);
 
-                vkDestroyImageView(device, mainPassDepthImageViews[i], nullptr);
-                vkDestroyImage(device, mainPassDepthImages[i], nullptr);
-                vkFreeMemory(device, mainPassDepthImageMemories[i], nullptr);
+                vkDestroyImageView(device, mainPassDepthImageViews[i], null);
+                vkDestroyImage(device, mainPassDepthImages[i], null);
+                vkFreeMemory(device, mainPassDepthImageMemories[i], null);
+
+                vkDestroyImageView(device, mainPassNormalImageViews[i], null);
+                vkDestroyImage(device, mainPassNormalImages[i], null);
+                vkFreeMemory(device, mainPassNormalImageMemories[i], null);
 
                 vkDestroyFramebuffer(device, mainPassFramebuffers[i], null);
+
             }
         }
 
@@ -4880,6 +4932,7 @@ private:
         createDepthResources();
         createFramebuffers();
         createPostResources();
+        updatePostDescriptors();
     }
 
     void createPostResources()
@@ -4906,7 +4959,16 @@ private:
             mainPassDepthImageViews[i] = createImageView(mainPassDepthImages[i], findDepthFormat(),
                                                          VK_IMAGE_ASPECT_DEPTH_BIT);
 
-            std::array<VkImageView, 2> attachments {mainPassImageViews[i], mainPassDepthImageViews[i]};
+            createImage(swapChainExtent.width, swapChainExtent.height, intermediateImageFormat,
+                        VK_IMAGE_TILING_OPTIMAL,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        mainPassNormalImages[i], mainPassNormalImageMemories[i]);
+
+            mainPassNormalImageViews[i] = createImageView(mainPassNormalImages[i], intermediateImageFormat,
+                                                          VK_IMAGE_ASPECT_COLOR_BIT);
+
+            std::array<VkImageView, 3> attachments {mainPassImageViews[i], mainPassNormalImageViews[i], mainPassDepthImageViews[i]};
 
             VkFramebufferCreateInfo fbCreateInfo {};
             fbCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
