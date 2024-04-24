@@ -200,5 +200,5 @@ void main()
         outColor = vec4(corrected_color / (corrected_color + vec3(1, 1, 1)), outColor.a);
     }
 
-    outNormal = vec4(normal, 1.0);
+    outNormal = vec4(normalize((ubo.camera * vec4(normal, 0.0)).xyz), 1);
 }

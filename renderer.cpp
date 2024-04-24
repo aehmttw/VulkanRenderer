@@ -11,6 +11,7 @@
 #include <fstream>
 #include <array>
 #include <map>
+#include <random>
 #include "vecmath.hpp"
 #include "json.hpp"
 
@@ -23,6 +24,10 @@ typedef uint32_t u32;
 
 static size_t meshesDrawn;
 static size_t meshesCulled;
+
+static std::uniform_real_distribution<float> dist_ = std::uniform_real_distribution<float>(0, 1);
+static std::random_device rng_;
+static std::mt19937 generator_(rng_());
 
 const std::vector<const char*> validationLayers =
         {
@@ -266,6 +271,15 @@ struct UniformBufferObject
     alignas(16) mat4 camera;
     alignas(16) mat4 environment;
     alignas(16) vec4 cameraPos;
+    bool hdr;
+};
+
+struct PostUniformBufferObject
+{
+    alignas(16) mat4 proj;
+    alignas(16) mat4 camera;
+    alignas(16) vec4 screenDimensions;
+    alignas(16) vec2 screenScale;
     bool hdr;
 };
 
@@ -1195,6 +1209,17 @@ public:
         int shadowRes;
     };
 
+    const int samplesPerPixel = 32;
+    const float sampleRadius = 0.25;
+    const float ambientOcclusionStrength = 0.5;
+
+    struct alignas(16) ShaderSample
+    {
+        vec4 pos;
+    };
+
+    std::vector<ShaderSample> shaderSamples {1024};
+
     struct ShadowMap
     {
         std::vector<VkFramebuffer> framebuffers {max_frames_in_flight};
@@ -2104,8 +2129,15 @@ private:
     std::vector<VkDeviceMemory> globalUniformBuffersMemory;
     std::vector<void*> globalUniformBuffersMapped;
 
+    std::vector<VkBuffer> postUniformBuffers;
+    std::vector<VkDeviceMemory> postUniformBuffersMemory;
+    std::vector<void*> postUniformBuffersMapped;
+
     std::vector<VkBuffer> shaderStorageBuffers;
     std::vector<VkDeviceMemory> shaderStorageBuffersMemory;
+
+    std::vector<VkBuffer> postShaderStorageBuffers;
+    std::vector<VkDeviceMemory> postShaderStorageBuffersMemory;
 
     VkDescriptorPool globalDescriptorPool;
     VkDescriptorSetLayout globalDescriptorSetLayout;
@@ -2279,6 +2311,8 @@ private:
         createPostResources();
         createShadowMapRenderPass();
 
+        setupShaderSamples();
+
         for (MaterialType* t: materialTypes)
         {
             t->createDescriptorSetLayout(device);
@@ -2295,12 +2329,15 @@ private:
         createFramebuffers();
         createShadowMapFramebuffers();
         createUniformBuffers();
+        createPostUniformBuffers();
         createDescriptorPool();
         createPostDescriptorPool();
         createCommandBuffers();
         createSyncObjects();
 
         createSSBOs();
+        createPostSSBOs();
+
         createDescriptorSets();
         createPostDescriptorSets();
         initMeshes();
@@ -3481,6 +3518,23 @@ private:
         }
     }
 
+    void createPostSSBOs()
+    {
+        if (!postPass)
+            return;
+
+        postShaderStorageBuffers.resize(max_frames_in_flight);
+        postShaderStorageBuffersMemory.resize(max_frames_in_flight);
+
+        for (int i = 0; i < max_frames_in_flight; i++)
+        {
+            VkDeviceSize size = shaderSamples.size() * sizeof(ShaderSample) + 16;
+            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         postShaderStorageBuffers[i], postShaderStorageBuffersMemory[i]);
+        }
+    }
+
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features)
     {
         for (VkFormat format: candidates)
@@ -3809,6 +3863,24 @@ private:
         }
     }
 
+    void createPostUniformBuffers()
+    {
+        if (!postPass)
+            return;
+
+        VkDeviceSize size = sizeof(PostUniformBufferObject);
+
+        postUniformBuffers.resize(max_frames_in_flight);
+        postUniformBuffersMemory.resize(max_frames_in_flight);
+        postUniformBuffersMapped.resize(max_frames_in_flight);
+
+        for (size_t i = 0; i < max_frames_in_flight; i++)
+        {
+            createBuffer(size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, postUniformBuffers[i], postUniformBuffersMemory[i]);
+            vkMapMemory(device, postUniformBuffersMemory[i], 0, size, 0, &postUniformBuffersMapped[i]);
+        }
+    }
+
     void createDescriptorPool()
     {
         std::vector<VkDescriptorPoolSize> poolSizes (4);
@@ -3841,9 +3913,13 @@ private:
         if (!postPass)
             return;
 
-        std::vector<VkDescriptorPoolSize> poolSizes (1);
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 3);
+        std::vector<VkDescriptorPoolSize> poolSizes (3);
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[0].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
+        poolSizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[2].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 3);
 
         VkDescriptorPoolCreateInfo poolInfo {};
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
@@ -3912,15 +3988,29 @@ private:
         if (!postPass)
             return;
 
-        std::vector<VkDescriptorSetLayoutBinding> bindings(1);
+        std::vector<VkDescriptorSetLayoutBinding> bindings(3);
+
+        VkDescriptorSetLayoutBinding uboLayoutBinding {};
+        uboLayoutBinding.binding = 0;
+        uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        uboLayoutBinding.descriptorCount = 1;
+        uboLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[0] = uboLayoutBinding;
+
+        VkDescriptorSetLayoutBinding ssboLayoutBinding {};
+        uboLayoutBinding.binding = 1;
+        uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        uboLayoutBinding.descriptorCount = 1;
+        uboLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1] = uboLayoutBinding;
 
         VkDescriptorSetLayoutBinding samplerLayoutBinding {};
-        samplerLayoutBinding.binding = 0;
+        samplerLayoutBinding.binding = 2;
         samplerLayoutBinding.descriptorCount = 3;
         samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBinding.pImmutableSamplers = null;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[0] = samplerLayoutBinding;
+        bindings[2] = samplerLayoutBinding;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo {};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -4071,15 +4161,41 @@ private:
             normal.imageView = mainPassNormalImageViews[i];
             normal.sampler = mainPassNormalSamplers[i];
 
-            std::array<VkWriteDescriptorSet, 1> descriptorWrites {};
-            std::array<VkDescriptorImageInfo, 3> imageInfos {color, normal, depth};
+            std::array<VkWriteDescriptorSet, 3> descriptorWrites {};
+            VkDescriptorBufferInfo bufferInfo {};
+            bufferInfo.buffer = postUniformBuffers[i];
+            bufferInfo.offset = 0;
+            bufferInfo.range = sizeof(PostUniformBufferObject);
+
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = postDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
             descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[0].descriptorCount = imageInfos.size();
-            descriptorWrites[0].pImageInfo = imageInfos.data();
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pBufferInfo = &bufferInfo;
+
+            VkDescriptorBufferInfo samples {};
+            samples.buffer = postShaderStorageBuffers[i];
+            samples.offset = 0;
+            samples.range = sizeof(ShaderSample) * shaderSamples.size() + 16;
+
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = postDescriptorSets[i];
+            descriptorWrites[1].dstBinding = 1;
+            descriptorWrites[1].dstArrayElement = 0;
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pBufferInfo = &samples;
+
+            std::array<VkDescriptorImageInfo, 3> imageInfos {color, normal, depth};
+            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[2].dstSet = postDescriptorSets[i];
+            descriptorWrites[2].dstBinding = 2;
+            descriptorWrites[2].dstArrayElement = 0;
+            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrites[2].descriptorCount = imageInfos.size();
+            descriptorWrites[2].pImageInfo = imageInfos.data();
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, null);
         }
@@ -4163,6 +4279,8 @@ private:
         if (!postPass)
             return;
 
+        updateSampleSSBOs();
+
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = postRenderPass;
@@ -4185,6 +4303,7 @@ private:
         renderPassInfo.clearValueCount = clearValues.size();
         renderPassInfo.pClearValues = clearValues.data();
 
+        updatePostUniformBuffer();
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipeline.pipeline);
@@ -4726,6 +4845,37 @@ private:
         memcpy(globalUniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
     }
 
+    void updatePostUniformBuffer()
+    {
+        PostUniformBufferObject ubo {};
+
+        if (scene->debugCameraMode)
+        {
+            ubo.proj = scene->debugCamera->perspectiveTransform;
+            ubo.camera = scene->debugCamera->cameraUserOffsetTransform;
+        }
+        else
+        {
+            ubo.proj = scene->currentCamera->perspectiveTransform;
+            ubo.camera = scene->currentCamera->cameraUserOffsetTransform;
+
+            float height = std::min((float) swapChainExtent.width / scene->currentCamera->aspectRatio / (float) swapChainExtent.height, 1.0f);
+            float width = std::min((float) swapChainExtent.height * scene->currentCamera->aspectRatio / (float) swapChainExtent.width, 1.0f);
+            float scaledHeight = scene->currentCamera->verticalFOVTan / height;
+            float scaledWidth = scene->currentCamera->aspectRatio * scaledHeight * (float) swapChainExtent.width / scene->currentCamera->aspectRatio / (float) swapChainExtent.height;
+
+            // Adapted from https://mynameismjp.wordpress.com/2010/09/05/position-from-depth-3/
+            float projA = scene->currentCamera->farPlane == std::numeric_limits<float>::infinity() ? 1.0f : scene->currentCamera->farPlane / (scene->currentCamera->farPlane - scene->currentCamera->nearPlane);
+            float projB = -projA * scene->currentCamera->nearPlane;
+
+            ubo.screenDimensions = vec4(scaledWidth, scaledHeight, projA, projB);
+            ubo.screenScale = vec2(width, height);
+        }
+
+        ubo.hdr = hdr;
+        memcpy(postUniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
+    }
+
     void updateLightSSBOs()
     {
         VkBuffer stagingBuffer;
@@ -4762,6 +4912,51 @@ private:
         vkUnmapMemory(device, stagingBufferMemory);
 
         copyBuffer(stagingBuffer, shaderStorageBuffers[currentFrame], size);
+
+        vkDestroyBuffer(device, stagingBuffer, null);
+        vkFreeMemory(device, stagingBufferMemory, null);
+    }
+
+    void setupShaderSamples()
+    {
+        for (auto & shaderSample : shaderSamples)
+        {
+            float distance = pow(dist_(generator_), 2.0f);
+            float yaw = dist_(generator_) * PI * 2;
+            float pitch = asin(dist_(generator_));
+            vec3 pos = vec3(cos(yaw) * cos(pitch), sin(yaw) * cos(pitch), sin(pitch)) * distance;
+            shaderSample.pos = vec4(pos, 0);
+        }
+    }
+
+    void updateSampleSSBOs()
+    {
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        u32 size = shaderSamples.size() * sizeof(ShaderSample) + 16;
+        createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer,
+                     stagingBufferMemory);
+
+        void *data;
+        vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
+        memcpy((char*) data + 16, shaderSamples.data(), size - 16);
+
+        u32 s = shaderSamples.size();
+        memcpy(data, &s, 4);
+
+        s = samplesPerPixel;
+        memcpy((char*) data + 4, &s, 4);
+
+        float r = sampleRadius;
+        memcpy((char*) data + 8, &r, 4);
+
+        r = ambientOcclusionStrength;
+        memcpy((char*) data + 12, &r, 4);
+
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        copyBuffer(stagingBuffer, postShaderStorageBuffers[currentFrame], size);
 
         vkDestroyBuffer(device, stagingBuffer, null);
         vkFreeMemory(device, stagingBufferMemory, null);
@@ -4819,6 +5014,14 @@ private:
             vkFreeMemory(device, globalUniformBuffersMemory[i], null);
             vkDestroyBuffer(device, shaderStorageBuffers[i], null);
             vkFreeMemory(device, shaderStorageBuffersMemory[i], null);
+
+            if (postPass)
+            {
+                vkDestroyBuffer(device, postUniformBuffers[i], null);
+                vkFreeMemory(device, postUniformBuffersMemory[i], null);
+                vkDestroyBuffer(device, postShaderStorageBuffers[i], null);
+                vkFreeMemory(device, postShaderStorageBuffersMemory[i], null);
+            }
         }
 
         for (MaterialType* m: materialTypes)

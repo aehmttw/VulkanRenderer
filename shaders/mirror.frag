@@ -20,6 +20,7 @@ layout(set = 0, binding = 1) uniform samplerCube envTexSampler[2];
 layout(set = 1, binding = 0) uniform sampler2D texSampler;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outNormal;
 
 void main()
 {
@@ -38,4 +39,6 @@ void main()
         vec3 corrected_color = pow(outColor.rgb, vec3(1.0 / 2.2));
         outColor = vec4(corrected_color / (corrected_color + vec3(1, 1, 1)), outColor.a);
     }
+
+    outNormal = vec4(normalize((ubo.camera * vec4(normal, 0.0)).xyz), 1);
 }
