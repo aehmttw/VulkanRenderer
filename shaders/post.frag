@@ -71,6 +71,4 @@ void main()
 
     outColor = texture(colorNormalDepthSampler[0], fragTexCoord.xy);
     outColor.rgb *= strength * vec3(1.0 - occludedSamples / float(samplesPerPixel)) + (1.0 - strength);
-
-    outColor.a = 1.0;
 }

@@ -1209,7 +1209,7 @@ public:
         int shadowRes;
     };
 
-    const int samplesPerPixel = 32;
+    int samplesPerPixel = 32;
     const float sampleRadius = 0.25;
     const float ambientOcclusionStrength = 0.5;
 
@@ -2117,6 +2117,10 @@ private:
     VkDeviceMemory depthImageMemory;
     VkImageView depthImageView;
 
+    VkImage normalImage;
+    VkDeviceMemory normalImageMemory;
+    VkImageView normalImageView;
+
     GraphicsPipeline postPipeline;
 
     VkRenderPass postRenderPass;
@@ -2325,7 +2329,7 @@ private:
         createDescriptorSetLayout();
         createPostDescriptorSetLayout();
         createGraphicsPipelines();
-        createDepthResources();
+        createFramebufferResources();
         createFramebuffers();
         createShadowMapFramebuffers();
         createUniformBuffers();
@@ -3375,7 +3379,14 @@ private:
 
         for (size_t i = 0; i < swapChainImageViews.size(); i++)
         {
-            VkImageView attachments[] = { swapChainImageViews[i], depthImageView };
+            std::vector<VkImageView> attachments;
+            attachments.emplace_back(swapChainImageViews[i]);
+
+            if (!postPass)
+                attachments.emplace_back(normalImageView);
+
+            attachments.emplace_back(depthImageView);
+
             VkFramebufferCreateInfo framebufferInfo {};
             framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 
@@ -3384,8 +3395,8 @@ private:
             else
                 framebufferInfo.renderPass = renderPass;
 
-            framebufferInfo.attachmentCount = 2;
-            framebufferInfo.pAttachments = attachments;
+            framebufferInfo.attachmentCount = attachments.size();
+            framebufferInfo.pAttachments = attachments.data();
             framebufferInfo.width = swapChainExtent.width;
             framebufferInfo.height = swapChainExtent.height;
             framebufferInfo.layers = 1;
@@ -3469,7 +3480,7 @@ private:
         createGraphicsPipeline<ComplexVertex>(materialTypePBR, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices}, true);
 
         if (postPass)
-            createGraphicsPipeline<PostVertex>(materialTypeSimple, "spv/post.vert.spv",  "spv/post.frag.spv", {}, true, true);
+            createGraphicsPipeline<PostVertex>(materialTypeSimple, "spv/post.vert.spv",  "spv/post-ssr.frag.spv", {}, true, true);
     }
 
     void destroyGraphicsPipelines()
@@ -3725,6 +3736,13 @@ private:
             sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
             destinationStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
         }
+        else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+        {
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            destinationStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        }
         else
             throw std::invalid_argument("unsupported layout transition!");
 
@@ -3733,12 +3751,17 @@ private:
         endSingleTimeCommands(commandBuffer);
     }
 
-    void createDepthResources()
+    void createFramebufferResources()
     {
         VkFormat depthFormat = findDepthFormat();
         createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
         depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
         transitionImageLayout(depthImage, depthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+        createImage(swapChainExtent.width, swapChainExtent.height, swapChainImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, normalImage, normalImageMemory);
+        normalImageView = createImageView(normalImage, swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+        transitionImageLayout(normalImage, swapChainImageFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
     }
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, VkBuffer& buffer, VkDeviceMemory& bufMem)
@@ -5076,6 +5099,10 @@ private:
         vkDestroyImageView(device, depthImageView, null);
         vkDestroyImage(device, depthImage, null);
         vkFreeMemory(device, depthImageMemory, null);
+
+        vkDestroyImageView(device, normalImageView, null);
+        vkDestroyImage(device, normalImage, null);
+        vkFreeMemory(device, normalImageMemory, null);
         
         for (auto framebuffer: swapChainFramebuffers)
         {
@@ -5132,7 +5159,7 @@ private:
         cleanupSwapChain();
         createSwapChain();
         createImageViews();
-        createDepthResources();
+        createFramebufferResources();
         createFramebuffers();
         createPostResources();
         updatePostDescriptors();
@@ -5203,6 +5230,8 @@ int main(int argc, char** args)
     bool stats = false;
     bool headless = false;
     bool hdr = false;
+    int ssaoSamples = 0;
+
     std::string events;
 
     for (int i = 0; i < argc; i++)
@@ -5246,6 +5275,9 @@ int main(int argc, char** args)
 
         if (strncmp(args[i], "--hdr", 5) == 0)
             hdr = true;
+
+        if (strncmp(args[i], "--ssao", 6) == 0 && i + 1 < argc)
+            ssaoSamples = std::stoi(args[i + 1]);
     }
 
     if (scene == null)
@@ -5264,6 +5296,10 @@ int main(int argc, char** args)
     app.logStats = stats;
     app.headless = headless;
     app.hdr = hdr;
+    app.postPass = ssaoSamples > 0;
+    if (app.postPass)
+        app.samplesPerPixel = ssaoSamples;
+
     if (app.headless)
         app.readHeadlessEvents(events);
 
