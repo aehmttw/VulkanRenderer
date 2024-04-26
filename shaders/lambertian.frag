@@ -47,6 +47,7 @@ layout(set = 1, binding = 0) uniform sampler2D texSampler[2];
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outNormal;
+layout(location = 2) out vec4 outSpecular;
 
 void main()
 {
@@ -132,4 +133,5 @@ void main()
     }
 
     outNormal = vec4(normalize((ubo.camera * vec4(normal, 0.0)).xyz), 1);
+    outSpecular = vec4(0.0);
 }

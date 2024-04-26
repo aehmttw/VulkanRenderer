@@ -5,6 +5,7 @@ layout(location = 1) in vec3 fragNormal;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outNormal;
+layout(location = 2) out vec4 outSpecular;
 
 layout(set = 0, binding = 0) uniform UniformBufferObject
 {
@@ -19,7 +20,7 @@ void main()
 {
     vec3 normal = fragNormal;
 
-    outColor = fragColor * (dot(normal, vec3(0.0, 0.0, 1.0)) / 2.0 + 0.5);
+    outColor = fragColor * (dot(normal, vec3(0.0, 0.0, 1.0)) / 4.0 + 0.75);
     outColor.a = fragColor.a;
 
     if (!ubo.hdr)
@@ -35,4 +36,5 @@ void main()
     }
 
     outNormal = vec4(normalize((ubo.camera * vec4(normal, 0.0)).xyz), 1);
+    outSpecular = vec4(0);
 }

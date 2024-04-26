@@ -648,7 +648,7 @@ public:
         VkImageView imageView;
         VkSampler sampler;
 
-        Texture(Renderer* r, vec3 data, bool cube = false)
+        Texture(Renderer* r, vec3 data, bool cube = false, unsigned char alpha = 255)
         {
             this->renderer = r;
             this->isCube = cube;
@@ -662,7 +662,7 @@ public:
                 this->data[0][i * 4 + 0] = (unsigned char) (255 * data.x);
                 this->data[0][i * 4 + 1] = (unsigned char) (255 * data.y);
                 this->data[0][i * 4 + 2] = (unsigned char) (255 * data.z);
-                this->data[0][i * 4 + 3] = 255;
+                this->data[0][i * 4 + 3] = alpha;
             }
 
             this->width = 1;
@@ -961,6 +961,7 @@ public:
 
     static MaterialType materialTypeSimple;
     static MaterialType materialTypePBR;
+    static MaterialType materialTypeSSR;
     static MaterialType materialTypeLambertian;
     static MaterialType materialTypeMirror;
     static MaterialType materialTypeEnvironment;
@@ -1068,6 +1069,59 @@ public:
                 descriptorWrites[0].dstArrayElement = 0;
                 descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 descriptorWrites[0].descriptorCount = 4;
+                descriptorWrites[0].pImageInfo = imageInfos.data();
+
+                vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, null);
+            }
+        }
+    };
+
+    struct MaterialSSR : Material
+    {
+        Texture* albedoTex = null;
+        Texture* specularTex = null;
+
+        MaterialSSR()
+        {
+            this->type = &materialTypeSSR;
+        }
+
+        ~MaterialSSR() override
+        {
+            delete albedoTex;
+            delete specularTex;
+        }
+
+        void createDescriptorSets(VkDevice &device) override
+        {
+            Material::createDescriptorSets(device);
+            for (size_t i = 0; i < max_frames_in_flight; i++)
+            {
+                VkDescriptorImageInfo normalInfo {};
+                normalInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                normalInfo.imageView = normalMap->imageView;
+                normalInfo.sampler = normalMap->sampler;
+
+                VkDescriptorImageInfo albedoInfo {};
+                albedoInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                albedoInfo.imageView = albedoTex->imageView;
+                albedoInfo.sampler = albedoTex->sampler;
+
+                VkDescriptorImageInfo specularInfo {};
+                specularInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                specularInfo.imageView = specularTex->imageView;
+                specularInfo.sampler = specularTex->sampler;
+
+                std::array<VkDescriptorImageInfo, 3> imageInfos {normalInfo, albedoInfo, specularInfo};
+
+                std::array<VkWriteDescriptorSet, 1> descriptorWrites {};
+
+                descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptorWrites[0].dstSet = descriptorSets[i];
+                descriptorWrites[0].dstBinding = 0;
+                descriptorWrites[0].dstArrayElement = 0;
+                descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                descriptorWrites[0].descriptorCount = imageInfos.size();
                 descriptorWrites[0].pImageInfo = imageInfos.data();
 
                 vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, null);
@@ -1211,7 +1265,7 @@ public:
 
     int samplesPerPixel = 32;
     const float sampleRadius = 0.25;
-    const float ambientOcclusionStrength = 0.5;
+    const float ambientOcclusionStrength = 1;
 
     struct alignas(16) ShaderSample
     {
@@ -1758,6 +1812,31 @@ public:
 
                     material = m;
                 }
+                else if ((*o)["ssr"] != null)
+                {
+                    auto m = new MaterialSSR();
+                    jobject* ssr = jobject::cast((*o)["ssr"]);
+
+                    jvalue* albedo = (*ssr)["albedo"];
+                    if (albedo->type == type_array)
+                    {
+                        jarray* a = jarray::cast(albedo);
+                        m->albedoTex = new Texture(this, vec3((float) jnumber::cast((*a)[0])->value, (float) jnumber::cast((*a)[1])->value, (float) jnumber::cast((*a)[2])->value), false);
+                    }
+                    else
+                        m->albedoTex = new Texture(this, jobject::cast(albedo));
+
+                    jvalue* roughness = (*ssr)["specular"];
+                    if (roughness->type == type_number)
+                    {
+                        auto v = (float) jnumber::cast(roughness)->value;
+                        m->specularTex = new Texture(this, vec3(v, v, v));
+                    }
+                    else
+                        m->specularTex = new Texture(this, jobject::cast(roughness));
+
+                    material = m;
+                }
                 else if ((*o)["mirror"] != null)
                     material = new MaterialMirror();
                 else if ((*o)["environment"] != null)
@@ -1981,6 +2060,8 @@ public:
     bool logStats = false;
     bool hdr = false;
     bool postPass = true;
+    bool ssao = true;
+    bool ssr = true;
 
     int headlessIndex = 0;
     long swapchainTime = 0;
@@ -2121,6 +2202,10 @@ private:
     VkDeviceMemory normalImageMemory;
     VkImageView normalImageView;
 
+    VkImage specularImage;
+    VkDeviceMemory specularImageMemory;
+    VkImageView specularImageView;
+
     GraphicsPipeline postPipeline;
 
     VkRenderPass postRenderPass;
@@ -2177,6 +2262,10 @@ private:
     std::vector<VkImageView> mainPassNormalImageViews {max_frames_in_flight};
     std::vector<VkSampler> mainPassNormalSamplers {max_frames_in_flight};
 
+    std::vector<VkImage> mainPassSpecularImages {max_frames_in_flight};
+    std::vector<VkDeviceMemory> mainPassSpecularImageMemories {max_frames_in_flight};
+    std::vector<VkImageView> mainPassSpecularImageViews {max_frames_in_flight};
+    std::vector<VkSampler> mainPassSpecularSamplers {max_frames_in_flight};
 
 
     VkBuffer panelBuffer;
@@ -2940,11 +3029,15 @@ private:
         normalAttachmentRef.attachment = 1;
         normalAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+        VkAttachmentReference specularAttachmentRef {};
+        specularAttachmentRef.attachment = 2;
+        specularAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
         VkAttachmentReference depthAttachmentRef{};
-        depthAttachmentRef.attachment = 2;
+        depthAttachmentRef.attachment = 3;
         depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-        std::array<VkAttachmentReference, 2> attachmentRefs {colorAttachmentRef, normalAttachmentRef};
+        std::array<VkAttachmentReference, 3> attachmentRefs {colorAttachmentRef, normalAttachmentRef, specularAttachmentRef};
 
         VkSubpassDescription subpass {};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -2988,7 +3081,7 @@ private:
             dependencies.emplace_back(dependency);
         }
 
-        std::array<VkAttachmentDescription, 3> attachments = {colorAttachment, colorAttachment, depthAttachment};
+        std::array<VkAttachmentDescription, 4> attachments = {colorAttachment, colorAttachment, colorAttachment, depthAttachment};
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -3037,6 +3130,13 @@ private:
                 }
 
                 result = vkCreateSampler(device, &samplerCreateInfo, null, &(mainPassNormalSamplers[i]));
+                if (result != VK_SUCCESS)
+                {
+                    printf("failed: %d\n", result);
+                    throw std::runtime_error("main pass normal sampler creation failed!");
+                }
+
+                result = vkCreateSampler(device, &samplerCreateInfo, null, &(mainPassSpecularSamplers[i]));
                 if (result != VK_SUCCESS)
                 {
                     printf("failed: %d\n", result);
@@ -3274,11 +3374,11 @@ private:
         colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
-        std::array<VkPipelineColorBlendAttachmentState, 2> cbas {colorBlendAttachment, colorBlendAttachment};
+        std::array<VkPipelineColorBlendAttachmentState, 3> cbas {colorBlendAttachment, colorBlendAttachment, colorBlendAttachment};
         VkPipelineColorBlendStateCreateInfo colorBlending {};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         colorBlending.logicOpEnable = VK_FALSE;
-        colorBlending.attachmentCount = (shadow || post) ? 1 : 2;
+        colorBlending.attachmentCount = (shadow || post) ? 1 : cbas.size();
         colorBlending.pAttachments = cbas.data();
 
         std::vector<VkDescriptorSetLayout> layouts;
@@ -3383,7 +3483,10 @@ private:
             attachments.emplace_back(swapChainImageViews[i]);
 
             if (!postPass)
+            {
                 attachments.emplace_back(normalImageView);
+                attachments.emplace_back(specularImageView);
+            }
 
             attachments.emplace_back(depthImageView);
 
@@ -3472,16 +3575,26 @@ private:
         createGraphicsPipeline<ComplexVertex>(materialTypeMirror, "spv/complex.vert.spv", "spv/mirror.frag.spv", {matrices});
         createGraphicsPipeline<ComplexVertex>(materialTypeLambertian, "spv/complex.vert.spv", "spv/lambertian.frag.spv", {matrices});
         createGraphicsPipeline<ComplexVertex>(materialTypePBR, "spv/complex.vert.spv", "spv/pbr.frag.spv", {matrices});
+        createGraphicsPipeline<ComplexVertex>(materialTypeSSR, "spv/complex.vert.spv", "spv/ssr.frag.spv", {matrices});
 
         createGraphicsPipeline<SimpleVertex>(materialTypeSimple, "spv/simple.vert.spv",  "spv/depth_simple.frag.spv", {matrices}, true);
         createGraphicsPipeline<ComplexVertex>(materialTypeEnvironment, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices}, true);
         createGraphicsPipeline<ComplexVertex>(materialTypeMirror, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices}, true);
         createGraphicsPipeline<ComplexVertex>(materialTypeLambertian, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices}, true);
         createGraphicsPipeline<ComplexVertex>(materialTypePBR, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices}, true);
+        createGraphicsPipeline<ComplexVertex>(materialTypeSSR, "spv/complex.vert.spv", "spv/depth_complex.frag.spv", {matrices}, true);
 
         if (postPass)
-            createGraphicsPipeline<PostVertex>(materialTypeSimple, "spv/post.vert.spv",  "spv/post-ssr.frag.spv", {}, true, true);
+        {
+            if (ssao && ssr)
+                createGraphicsPipeline<PostVertex>(materialTypeSimple, "spv/post.vert.spv", "spv/post-ssr-ssao.frag.spv",{}, true, true);
+            else if (ssr)
+                createGraphicsPipeline<PostVertex>(materialTypeSimple, "spv/post.vert.spv", "spv/post-ssr.frag.spv",{}, true, true);
+            else
+                createGraphicsPipeline<PostVertex>(materialTypeSimple, "spv/post.vert.spv", "spv/post-ssao.frag.spv",{}, true, true);
+        }
     }
+
 
     void destroyGraphicsPipelines()
     {
@@ -3762,6 +3875,10 @@ private:
         normalImageView = createImageView(normalImage, swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT);
         transitionImageLayout(normalImage, swapChainImageFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
+        createImage(swapChainExtent.width, swapChainExtent.height, swapChainImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, specularImage, specularImageMemory);
+        specularImageView = createImageView(specularImage, swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+        transitionImageLayout(specularImage, swapChainImageFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
     }
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, VkBuffer& buffer, VkDeviceMemory& bufMem)
@@ -3942,7 +4059,7 @@ private:
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         poolSizes[1].descriptorCount = static_cast<uint32_t>(max_frames_in_flight);
         poolSizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[2].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 3);
+        poolSizes[2].descriptorCount = static_cast<uint32_t>(max_frames_in_flight * 4);
 
         VkDescriptorPoolCreateInfo poolInfo {};
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
@@ -4029,7 +4146,7 @@ private:
 
         VkDescriptorSetLayoutBinding samplerLayoutBinding {};
         samplerLayoutBinding.binding = 2;
-        samplerLayoutBinding.descriptorCount = 3;
+        samplerLayoutBinding.descriptorCount = 4;
         samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBinding.pImmutableSamplers = null;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -4174,15 +4291,20 @@ private:
             color.imageView = mainPassImageViews[i];
             color.sampler = mainPassSamplers[i];
 
-            VkDescriptorImageInfo depth {};
-            depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            depth.imageView = mainPassDepthImageViews[i];
-            depth.sampler = mainPassDepthSamplers[i];
-
             VkDescriptorImageInfo normal {};
             normal.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             normal.imageView = mainPassNormalImageViews[i];
             normal.sampler = mainPassNormalSamplers[i];
+
+            VkDescriptorImageInfo specular {};
+            specular.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            specular.imageView = mainPassSpecularImageViews[i];
+            specular.sampler = mainPassSpecularSamplers[i];
+
+            VkDescriptorImageInfo depth {};
+            depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            depth.imageView = mainPassDepthImageViews[i];
+            depth.sampler = mainPassDepthSamplers[i];
 
             std::array<VkWriteDescriptorSet, 3> descriptorWrites {};
             VkDescriptorBufferInfo bufferInfo {};
@@ -4211,7 +4333,7 @@ private:
             descriptorWrites[1].descriptorCount = 1;
             descriptorWrites[1].pBufferInfo = &samples;
 
-            std::array<VkDescriptorImageInfo, 3> imageInfos {color, normal, depth};
+            std::array<VkDescriptorImageInfo, 4> imageInfos {color, normal, specular, depth};
             descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[2].dstSet = postDescriptorSets[i];
             descriptorWrites[2].dstBinding = 2;
@@ -4366,10 +4488,11 @@ private:
         renderPassInfo.renderArea.offset = {0, 0};
         renderPassInfo.renderArea.extent = swapChainExtent;
 
-        std::array<VkClearValue, 3> clearValues {};
+        std::array<VkClearValue, 4> clearValues {};
         clearValues[0].color = {scene->debugCameraMode ? 0.2f : 0.0f, 0.0f, 0.0f, 1.0f};
         clearValues[1].color = {0, 0, 1, 1};
-        clearValues[2].depthStencil = {1.0f, 0};
+        clearValues[2].color = {0, 0, 0, 1};
+        clearValues[3].depthStencil = {1.0f, 0};
         renderPassInfo.clearValueCount = clearValues.size();
         renderPassInfo.pClearValues = clearValues.data();
 
@@ -5026,7 +5149,7 @@ private:
             vkDestroySampler(device, mainPassSamplers[i], null);
             vkDestroySampler(device, mainPassDepthSamplers[i], null);
             vkDestroySampler(device, mainPassNormalSamplers[i], null);
-
+            vkDestroySampler(device, mainPassSpecularSamplers[i], null);
         }
 
         cleanupSwapChain();
@@ -5103,6 +5226,10 @@ private:
         vkDestroyImageView(device, normalImageView, null);
         vkDestroyImage(device, normalImage, null);
         vkFreeMemory(device, normalImageMemory, null);
+
+        vkDestroyImageView(device, specularImageView, null);
+        vkDestroyImage(device, specularImage, null);
+        vkFreeMemory(device, specularImageMemory, null);
         
         for (auto framebuffer: swapChainFramebuffers)
         {
@@ -5129,6 +5256,10 @@ private:
                 vkDestroyImageView(device, mainPassNormalImageViews[i], null);
                 vkDestroyImage(device, mainPassNormalImages[i], null);
                 vkFreeMemory(device, mainPassNormalImageMemories[i], null);
+
+                vkDestroyImageView(device, mainPassSpecularImageViews[i], null);
+                vkDestroyImage(device, mainPassSpecularImages[i], null);
+                vkFreeMemory(device, mainPassSpecularImageMemories[i], null);
 
                 vkDestroyFramebuffer(device, mainPassFramebuffers[i], null);
 
@@ -5198,7 +5329,16 @@ private:
             mainPassNormalImageViews[i] = createImageView(mainPassNormalImages[i], intermediateImageFormat,
                                                           VK_IMAGE_ASPECT_COLOR_BIT);
 
-            std::array<VkImageView, 3> attachments {mainPassImageViews[i], mainPassNormalImageViews[i], mainPassDepthImageViews[i]};
+            createImage(swapChainExtent.width, swapChainExtent.height, intermediateImageFormat,
+                        VK_IMAGE_TILING_OPTIMAL,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        mainPassSpecularImages[i], mainPassSpecularImageMemories[i]);
+
+            mainPassSpecularImageViews[i] = createImageView(mainPassSpecularImages[i], intermediateImageFormat,
+                                                          VK_IMAGE_ASPECT_COLOR_BIT);
+
+            std::array<VkImageView, 4> attachments {mainPassImageViews[i], mainPassNormalImageViews[i], mainPassSpecularImageViews[i], mainPassDepthImageViews[i]};
 
             VkFramebufferCreateInfo fbCreateInfo {};
             fbCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -5231,6 +5371,7 @@ int main(int argc, char** args)
     bool headless = false;
     bool hdr = false;
     int ssaoSamples = 0;
+    bool ssr = false;
 
     std::string events;
 
@@ -5278,6 +5419,9 @@ int main(int argc, char** args)
 
         if (strncmp(args[i], "--ssao", 6) == 0 && i + 1 < argc)
             ssaoSamples = std::stoi(args[i + 1]);
+
+        if (strncmp(args[i], "--ssr", 5) == 0)
+            ssr = true;
     }
 
     if (scene == null)
@@ -5296,7 +5440,10 @@ int main(int argc, char** args)
     app.logStats = stats;
     app.headless = headless;
     app.hdr = hdr;
-    app.postPass = ssaoSamples > 0;
+    app.postPass = ssaoSamples > 0 || ssr;
+    app.ssao = ssaoSamples > 0;
+    app.ssr = ssr;
+
     if (app.postPass)
         app.samplesPerPixel = ssaoSamples;
 
@@ -5320,6 +5467,7 @@ int main(int argc, char** args)
 std::vector<Renderer::MaterialType*> Renderer::materialTypes;
 Renderer::MaterialType Renderer::materialTypeSimple = MaterialType(0);
 Renderer::MaterialType Renderer::materialTypePBR = MaterialType(4);
+Renderer::MaterialType Renderer::materialTypeSSR = MaterialType(3);
 Renderer::MaterialType Renderer::materialTypeLambertian = MaterialType(2);
 Renderer::MaterialType Renderer::materialTypeMirror = MaterialType(1);
 Renderer::MaterialType Renderer::materialTypeEnvironment = MaterialType(1);
