@@ -4965,6 +4965,7 @@ private:
 
         if (logStats)
             printf("Drew %lu meshes in %lld (%lu culled); avg time %lld\n", meshesDrawn, t, meshesCulled, total / num);
+//            printf("%d, %lld\n", swapChainExtent.width * swapChainExtent.height, t);
 
 //        printf("%lu, %lld\n", meshesDrawn, (end - time).count());
     }

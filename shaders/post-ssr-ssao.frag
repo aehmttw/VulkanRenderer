@@ -30,6 +30,17 @@ layout(set = 0, binding = 2) uniform sampler2D colorNormalSpecularDepthSampler[4
 // Coordinates recovering: adapted from https://mynameismjp.wordpress.com/2010/09/05/position-from-depth-3/
 void main()
 {
+//    if (fragTexCoord.x < 0.5 && fragTexCoord.y < 0.5)
+//        outColor = texture(colorNormalSpecularDepthSampler[0], fragTexCoord);
+//    else if (fragTexCoord.x < 0.5)
+//        outColor = texture(colorNormalSpecularDepthSampler[1], fragTexCoord);
+//    else if (fragTexCoord.y < 0.5)
+//        outColor = texture(colorNormalSpecularDepthSampler[2], fragTexCoord);
+//    else
+//        outColor = texture(colorNormalSpecularDepthSampler[3], fragTexCoord);
+//
+//    return;
+
     float depthSampled = texture(colorNormalSpecularDepthSampler[3], fragTexCoord).x;
 
     vec2 viewCoord = (fragTexCoord * 2.0 - vec2(1.0)) * ubo.screenDimensions.xy;

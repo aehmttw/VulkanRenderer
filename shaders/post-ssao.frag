@@ -71,4 +71,6 @@ void main()
 
     outColor = texture(colorNormalSpecularDepthSampler[0], fragTexCoord.xy);
     outColor.rgb *= strength * vec3(1.0 - occludedSamples / float(samplesPerPixel)) + (1.0 - strength);
+
+
 }

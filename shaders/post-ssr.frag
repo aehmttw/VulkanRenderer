@@ -32,6 +32,7 @@ void main()
     vec3 normal = texture(colorNormalSpecularDepthSampler[1], fragTexCoord).xyz;
     normal.x = -normal.x;
     vec3 dir = reflect(normalize(-viewRay), normal);
+
     outColor = texture(colorNormalSpecularDepthSampler[0], fragTexCoord.xy);
 
     float specularSampled = texture(colorNormalSpecularDepthSampler[2], fragTexCoord).x;
